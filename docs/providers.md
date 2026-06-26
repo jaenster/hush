@@ -26,19 +26,26 @@ a literal and returned unchanged.
 
 ## Built-in providers
 
-| scheme | resolved with | reference format |
+| scheme | resolved with | invocation |
 |-|-|-|
-| `op://` | [1Password CLI](https://developer.1password.com/docs/cli/) | `op://<vault>/<item>/<field>` |
-| `keeper://` | [Keeper Secrets Manager CLI](https://docs.keeper.io/secrets-manager/) (`ksm`) | `keeper://<record>/field/<name>` |
+| `op://` | [1Password CLI](https://developer.1password.com/docs/cli/) | `op read --no-newline {ref}` |
+| `keeper://` | [Keeper Secrets Manager](https://docs.keeper.io/secrets-manager/) (`ksm`) | `ksm secret notation {ref}` |
+| `aws://` | AWS CLI | `aws secretsmanager get-secret-value --secret-id {path} --query SecretString --output text` |
+| `gopass://` | [gopass](https://www.gopass.pw/) | `gopass show -o {path}` |
+| `pass://` | [pass](https://www.passwordstore.org/) | `pass show {path}` |
+| `vault://` | [HashiCorp Vault](https://www.vaultproject.io/) | `vault kv get -field=value {path}` |
 
-Exact invocations:
+`{ref}` is the full reference; `{path}` is the part after `scheme://`. Examples:
 
+```sh
+hush set prod DB  'op://Private/app-db/url'        # op read op://Private/app-db/url
+hush set prod KEY 'aws://prod/stripe'              # aws ... --secret-id prod/stripe
+hush set prod PW  'pass://email/work'              # pass show email/work
 ```
-op://…      ->  op read --no-newline <ref>
-keeper://…  ->  ksm secret notation <ref>
-```
 
-A single trailing newline from the CLI is trimmed.
+A single trailing newline from the CLI is trimmed. Note that `pass` prints the
+whole entry, so structure the entry's first line as the value (or use `gopass`,
+which returns only the secret with `-o`).
 
 ## Requirements
 
@@ -79,7 +86,6 @@ pub const default_registry = [_]Provider{
 };
 ```
 
-Add an entry with the scheme and the CLI argv template; the literal token
-`{ref}` is replaced by the full reference at resolve time. Anything that prints
-the secret to stdout works (AWS Secrets Manager, Vault, `gopass`, a custom
-script, …).
+Add an entry with the scheme and the CLI argv template; the tokens `{ref}` (full
+reference) and `{path}` (after `scheme://`) are substituted at resolve time.
+Anything that prints the secret to stdout works.

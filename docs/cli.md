@@ -46,6 +46,16 @@ docker run --env-file <(hush env --format=dotenv)   # KEY=value lines
 - `dotenv` (aliases `docker`, `env-file`): raw `KEY=value`. Multi-line values
   are skipped (env files can't represent them).
 
+### `hush import <file.env> [--env=<env>]`
+Bulk-import a `.env` file into an env (one secret per `KEY=value` line).
+Understands `export` prefixes, `#` comments, blank lines, and single/double
+quotes (double-quoted values expand `\n \r \t`). Keys that aren't valid env var
+names are skipped with a warning. Reuses a single connection.
+
+```sh
+hush import .env --env=dev      # migrate an existing project in one shot
+```
+
 ### `hush set <env> <key> <value>`
 Store a secret. `<key>` must be a valid env var name (`[A-Za-z_][A-Za-z0-9_]*`).
 The value may be a literal or a [provider reference](providers.md)

@@ -20,6 +20,7 @@ const usage =
     \\  hush -- <command> [args...]              run a command with secrets injected
     \\  hush --env=<env> -- <command> [args...]  ... using a specific env
     \\  hush env [--env=<env>] [--format=shell|dotenv]   print secrets for eval or --env-file
+    \\  hush import <file.env> [--env=<env>]     bulk-import a .env file
     \\  hush set <env> <key> <value>
     \\  hush get <env> <key>
     \\  hush del <env> <key>
@@ -75,6 +76,9 @@ pub fn main(init: std.process.Init) !u8 {
     }
     if (std.mem.eql(u8, verb, "env")) {
         return envCommand(init, args[1..]);
+    }
+    if (std.mem.eql(u8, verb, "import")) {
+        return importCommand(init, args[1..]);
     }
 
     // Everything else is "run mode": `hush run -- cmd`, `hush -- cmd`,
@@ -334,6 +338,105 @@ fn writeShellQuoted(out: *std.Io.Writer, s: []const u8) !void {
     }
     try out.writeAll(rest);
     try out.writeAll("'");
+}
+
+/// `hush import <file.env> [--env=<env>]`: read a .env file and store each
+/// KEY=value into the env (one connection, reused for every set).
+fn importCommand(init: std.process.Init, rest: []const []const u8) !u8 {
+    const io = init.io;
+    const gpa = init.gpa;
+
+    var file_path: ?[]const u8 = null;
+    var env_flag: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < rest.len) : (i += 1) {
+        const a = rest[i];
+        if (std.mem.startsWith(u8, a, "--env=")) {
+            env_flag = a["--env=".len..];
+        } else if (std.mem.eql(u8, a, "--env")) {
+            i += 1;
+            if (i >= rest.len) {
+                std.debug.print("hush: --env needs a value\n", .{});
+                return 2;
+            }
+            env_flag = rest[i];
+        } else if (std.mem.startsWith(u8, a, "-")) {
+            std.debug.print("hush: unknown option '{s}'\n", .{a});
+            return 2;
+        } else if (file_path == null) {
+            file_path = a;
+        } else {
+            std.debug.print("hush: too many arguments\n", .{});
+            return 2;
+        }
+    }
+
+    const path = file_path orelse {
+        std.debug.print("usage: hush import <file.env> [--env=<env>]\n", .{});
+        return 2;
+    };
+    const env_name = env_flag orelse init.environ_map.get("HUSH_ENV") orelse default_env;
+
+    const content = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(16 << 20)) catch |err| {
+        std.debug.print("hush: cannot read '{s}': {t}\n", .{ path, err });
+        return 1;
+    };
+    defer freeSecret(gpa, content);
+
+    var parsed = hush.dotenv.parse(gpa, content) catch {
+        std.debug.print("hush: could not parse '{s}'\n", .{path});
+        return 1;
+    };
+    defer parsed.deinit();
+
+    if (parsed.entries.len == 0) {
+        std.debug.print("hush: no entries found in '{s}'\n", .{path});
+        return 0;
+    }
+
+    var stream = (try connectOrReport(io, gpa)) orelse return 1;
+    defer stream.close(io);
+    var rbuf: [4096]u8 = undefined;
+    var wbuf: [4096]u8 = undefined;
+    var sr = stream.reader(io, &rbuf);
+    var sw = stream.writer(io, &wbuf);
+
+    var imported: usize = 0;
+    var skipped: usize = 0;
+    for (parsed.entries) |e| {
+        if (!hush.names.isEnvVarName(e.key)) {
+            std.debug.print("hush: skipping invalid key '{s}'\n", .{e.key});
+            skipped += 1;
+            continue;
+        }
+        const payload = hush.protocol.encodeRequest(gpa, .{ .set = .{ .env = env_name, .key = e.key, .value = e.value } }) catch {
+            std.debug.print("hush: skipping '{s}' (too large)\n", .{e.key});
+            skipped += 1;
+            continue;
+        };
+        defer freeSecret(gpa, payload);
+        try hush.transport.writeFrame(&sw.interface, payload);
+
+        const resp_buf = try hush.transport.readFrame(&sr.interface, gpa);
+        defer freeSecret(gpa, resp_buf);
+        var resp = try hush.protocol.decodeResponse(gpa, resp_buf);
+        defer resp.deinit(gpa);
+
+        if (resp.status == .ok) {
+            imported += 1;
+        } else {
+            const msg = if (resp.fields.items.len > 0) resp.fields.items[0] else "error";
+            std.debug.print("hush: {s}: {s}\n", .{ e.key, msg });
+            skipped += 1;
+        }
+    }
+
+    if (skipped > 0) {
+        std.debug.print("imported {d} secret(s) into '{s}' ({d} skipped)\n", .{ imported, env_name, skipped });
+    } else {
+        std.debug.print("imported {d} secret(s) into '{s}'\n", .{ imported, env_name });
+    }
+    return 0;
 }
 
 /// Zero a heap buffer that may contain secret material, then free it.

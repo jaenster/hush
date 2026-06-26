@@ -6,6 +6,7 @@ pub const store = @import("store.zig");
 pub const paths = @import("paths.zig");
 pub const transport = @import("transport.zig");
 pub const names = @import("names.zig");
+pub const dotenv = @import("dotenv.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());

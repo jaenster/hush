@@ -13,13 +13,21 @@ const std = @import("std");
 
 pub const Provider = struct {
     scheme: []const u8,
-    /// argv template; the literal token "{ref}" is replaced by the full reference.
+    /// argv template. Two placeholder tokens are substituted per element:
+    ///   "{ref}"  -> the full reference (e.g. "op://Vault/item/field")
+    ///   "{path}" -> the part after "scheme://" (e.g. "Vault/item/field")
     argv: []const []const u8,
 };
 
 pub const default_registry = [_]Provider{
+    // 1Password and Keeper take the full URI.
     .{ .scheme = "op", .argv = &.{ "op", "read", "--no-newline", "{ref}" } },
     .{ .scheme = "keeper", .argv = &.{ "ksm", "secret", "notation", "{ref}" } },
+    // These take a bare path/name after the scheme.
+    .{ .scheme = "aws", .argv = &.{ "aws", "secretsmanager", "get-secret-value", "--secret-id", "{path}", "--query", "SecretString", "--output", "text" } },
+    .{ .scheme = "gopass", .argv = &.{ "gopass", "show", "-o", "{path}" } },
+    .{ .scheme = "pass", .argv = &.{ "pass", "show", "{path}" } },
+    .{ .scheme = "vault", .argv = &.{ "vault", "kv", "get", "-field=value", "{path}" } },
 };
 
 pub const Error = error{ NotAReference, ResolveFailed };
@@ -48,10 +56,17 @@ pub fn resolve(gpa: std.mem.Allocator, io: std.Io, value: []const u8) ![]u8 {
 pub fn resolveWith(gpa: std.mem.Allocator, io: std.Io, registry: []const Provider, value: []const u8) ![]u8 {
     const p = match(registry, value) orelse return Error.NotAReference;
 
+    const path = if (std.mem.indexOf(u8, value, "://")) |sep| value[sep + 3 ..] else value;
+
     const argv = try gpa.alloc([]const u8, p.argv.len);
     defer gpa.free(argv);
     for (p.argv, 0..) |arg, i| {
-        argv[i] = if (std.mem.eql(u8, arg, "{ref}")) value else arg;
+        argv[i] = if (std.mem.eql(u8, arg, "{ref}"))
+            value
+        else if (std.mem.eql(u8, arg, "{path}"))
+            path
+        else
+            arg;
     }
 
     const res = std.process.run(gpa, io, .{
@@ -82,6 +97,16 @@ test "resolveWith substitutes {ref} and captures stdout" {
     try std.testing.expectEqualStrings("mock://hello/world", v);
 }
 
+test "resolveWith substitutes {path} (after scheme)" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const reg = [_]Provider{.{ .scheme = "aws", .argv = &.{ "printf", "%s", "{path}" } }};
+
+    const v = try resolveWith(a, io, &reg, "aws://prod/db/password");
+    defer a.free(v);
+    try std.testing.expectEqualStrings("prod/db/password", v);
+}
+
 test "resolveWith trims trailing newline" {
     const a = std.testing.allocator;
     const io = std.testing.io;
@@ -103,6 +128,10 @@ test "resolveWith fails on nonzero exit" {
 test "isReference detects known schemes only" {
     try std.testing.expect(isReference("op://Vault/item/field"));
     try std.testing.expect(isReference("keeper://abc/field/login"));
+    try std.testing.expect(isReference("aws://prod/db"));
+    try std.testing.expect(isReference("gopass://x/y"));
+    try std.testing.expect(isReference("pass://x/y"));
+    try std.testing.expect(isReference("vault://secret/app"));
     try std.testing.expect(!isReference("postgres://localhost/db")); // unknown scheme = literal
     try std.testing.expect(!isReference("plain-secret"));
 }

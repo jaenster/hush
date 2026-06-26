@@ -37,6 +37,12 @@ hush ls dev               # DATABASE_URL, STRIPE_KEY
 hush get dev STRIPE_KEY   # sk_test_123
 ```
 
+Already have a `.env`? Import it in one shot:
+
+```sh
+hush import .env --env=dev
+```
+
 ## Run a command with secrets injected
 
 This is the everyday path — it replaces `.env`:

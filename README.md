@@ -41,7 +41,7 @@ hush ping                            # health check
 ```
 
 Secrets are organized as `(env, key) -> value`, so `dev`, `tst` and `prod` are kept
-separate.
+separate. Already have a `.env`? `hush import .env --env=dev` migrates it in one shot.
 
 ### Replacing `.env`
 
@@ -108,9 +108,10 @@ hush get prod DATABASE_URL     # runs `op read ...`, prints the real value
 hush -- ./server               # injects the resolved values
 ```
 
-`op` / `ksm` must be installed and authenticated in the daemon's environment.
-See [docs/providers.md](docs/providers.md) (adding a provider is a one-line
-table entry).
+Built-in: `op://` (1Password), `keeper://` (Keeper), `aws://` (Secrets Manager),
+`gopass://`, `pass://`, `vault://` (HashiCorp). The provider CLI must be
+installed and authenticated in the daemon's environment. Adding another is a
+one-line table entry — see [docs/providers.md](docs/providers.md).
 
 ## Architecture
 
