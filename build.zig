@@ -69,5 +69,17 @@ pub fn build(b: *std.Build) void {
     // Tests over the core module.
     const core_tests = b.addTest(.{ .root_module = core });
     const run_core_tests = b.addRunArtifact(core_tests);
-    b.step("test", "Run tests").dependOn(&run_core_tests.step);
+
+    // Tests over the daemon-only modules (providers, etc.).
+    const providers_mod = b.createModule(.{
+        .root_source_file = b.path("src/daemon/providers.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const providers_tests = b.addTest(.{ .root_module = providers_mod });
+    const run_providers_tests = b.addRunArtifact(providers_tests);
+
+    const test_step = b.step("test", "Run tests");
+    test_step.dependOn(&run_core_tests.step);
+    test_step.dependOn(&run_providers_tests.step);
 }

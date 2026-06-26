@@ -5,6 +5,7 @@
 const std = @import("std");
 const hush = @import("hush");
 const key_provider = @import("key_provider.zig");
+const providers = @import("providers.zig");
 
 const log = std.log.scoped(.hushd);
 
@@ -153,9 +154,17 @@ fn handleRequest(
             return proto.encodeResponse(gpa, .ok, &.{});
         },
         .get => |g| {
-            if (try store.get(g.env, g.key)) |val|
-                return proto.encodeResponse(gpa, .ok, &.{val});
-            return proto.encodeResponse(gpa, .not_found, &.{});
+            const val = (try store.get(g.env, g.key)) orelse
+                return proto.encodeResponse(gpa, .not_found, &.{});
+            if (providers.isReference(val)) {
+                const resolved = providers.resolve(gpa, io, val) catch |e| {
+                    log.warn("could not resolve reference {s}: {t}", .{ val, e });
+                    return proto.encodeResponse(gpa, .err, &.{"failed to resolve reference (is the provider CLI installed and authenticated?)"});
+                };
+                defer gpa.free(resolved);
+                return proto.encodeResponse(gpa, .ok, &.{resolved});
+            }
+            return proto.encodeResponse(gpa, .ok, &.{val});
         },
         .del => |d| {
             const existed = store.del(d.env, d.key) catch |e| return errResp(gpa, e);
@@ -170,12 +179,27 @@ fn handleRequest(
         .dump => |d| {
             const pairs = try store.dump(gpa, d.env);
             defer gpa.free(pairs);
-            // Flatten to alternating key, value fields.
+
+            // Flatten to alternating key, value fields, resolving any references.
             var fields: std.ArrayList([]const u8) = .empty;
             defer fields.deinit(gpa);
+            var resolved_bufs: std.ArrayList([]u8) = .empty;
+            defer {
+                for (resolved_bufs.items) |b| gpa.free(b);
+                resolved_bufs.deinit(gpa);
+            }
             for (pairs) |p| {
                 try fields.append(gpa, p.name);
-                try fields.append(gpa, p.value);
+                if (providers.isReference(p.value)) {
+                    const resolved = providers.resolve(gpa, io, p.value) catch |e| {
+                        log.warn("could not resolve reference {s}: {t}", .{ p.value, e });
+                        return proto.encodeResponse(gpa, .err, &.{"failed to resolve a reference in this env (is the provider CLI installed and authenticated?)"});
+                    };
+                    try resolved_bufs.append(gpa, resolved);
+                    try fields.append(gpa, resolved);
+                } else {
+                    try fields.append(gpa, p.value);
+                }
             }
             return proto.encodeResponse(gpa, .ok, fields.items);
         },
