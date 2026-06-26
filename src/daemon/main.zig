@@ -36,6 +36,8 @@ pub fn main(init: std.process.Init) !u8 {
     std.Io.Dir.cwd().setFilePermissions(io, paths.socket, std.Io.File.Permissions.fromMode(0o600), .{}) catch |err|
         log.warn("could not chmod socket to 0600: {t}", .{err});
 
+    installSignalHandlers(paths.socket);
+
     log.info("listening on {s}", .{paths.socket});
     log.warn("ephemeral key in use: secrets will NOT survive a restart (key management pending)", .{});
 
@@ -61,6 +63,11 @@ fn handleConn(
 ) !void {
     var rbuf: [4096]u8 = undefined;
     var wbuf: [4096]u8 = undefined;
+    // Request/response buffers may hold secret values; wipe them on the way out.
+    defer {
+        hush.crypto.zero(&rbuf);
+        hush.crypto.zero(&wbuf);
+    }
     var sr = stream.reader(io, &rbuf);
     var sw = stream.writer(io, &wbuf);
     const r = &sr.interface;
@@ -68,13 +75,23 @@ fn handleConn(
 
     while (true) {
         const payload = try hush.transport.readFrame(r, gpa);
-        defer gpa.free(payload);
+        defer freeSecret(gpa, payload);
 
         const resp = try handleRequest(io, gpa, store, paths, payload);
-        defer gpa.free(resp);
+        defer freeSecret(gpa, resp);
 
         try hush.transport.writeFrame(w, resp);
     }
+}
+
+/// Zero a heap buffer that may contain secret material, then free it.
+fn freeSecret(gpa: std.mem.Allocator, buf: []u8) void {
+    hush.crypto.zero(buf);
+    gpa.free(buf);
+}
+
+fn errResp(gpa: std.mem.Allocator, e: anyerror) ![]u8 {
+    return hush.protocol.encodeResponse(gpa, .err, &.{@errorName(e)});
 }
 
 /// Decode one request, apply it, and return the encoded response payload
@@ -93,8 +110,8 @@ fn handleRequest(
     switch (req) {
         .ping => return proto.encodeResponse(gpa, .ok, &.{}),
         .set => |s| {
-            try store.set(s.env, s.key, s.value);
-            try store.save(io, paths.vault);
+            store.set(s.env, s.key, s.value) catch |e| return errResp(gpa, e);
+            store.save(io, paths.vault) catch |e| return errResp(gpa, e);
             return proto.encodeResponse(gpa, .ok, &.{});
         },
         .get => |g| {
@@ -103,8 +120,8 @@ fn handleRequest(
             return proto.encodeResponse(gpa, .not_found, &.{});
         },
         .del => |d| {
-            const existed = try store.del(d.env, d.key);
-            try store.save(io, paths.vault);
+            const existed = store.del(d.env, d.key) catch |e| return errResp(gpa, e);
+            store.save(io, paths.vault) catch |e| return errResp(gpa, e);
             return proto.encodeResponse(gpa, if (existed) .ok else .not_found, &.{});
         },
         .list => |l| {
@@ -113,4 +130,36 @@ fn handleRequest(
             return proto.encodeResponse(gpa, .ok, names);
         },
     }
+}
+
+// --- graceful shutdown -------------------------------------------------------
+//
+// On SIGINT/SIGTERM, remove the socket file so we don't leave a dead socket
+// behind. `unlink` and `_exit` are async-signal-safe; nothing else is done in
+// the handler. mlock'd pages were never swapped, so exiting without an explicit
+// wipe still keeps secrets off disk.
+
+var g_socket_path: [std.Io.net.UnixAddress.max_len + 1]u8 = undefined;
+var g_socket_path_len: usize = 0;
+
+fn handleSignal(_: std.posix.SIG) callconv(.c) void {
+    if (g_socket_path_len != 0) {
+        g_socket_path[g_socket_path_len] = 0;
+        _ = std.c.unlink(@ptrCast(&g_socket_path));
+    }
+    std.c._exit(0);
+}
+
+fn installSignalHandlers(socket: []const u8) void {
+    if (socket.len < g_socket_path.len) {
+        @memcpy(g_socket_path[0..socket.len], socket);
+        g_socket_path_len = socket.len;
+    }
+    const act = std.posix.Sigaction{
+        .handler = .{ .handler = handleSignal },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.INT, &act, null);
+    std.posix.sigaction(std.posix.SIG.TERM, &act, null);
 }

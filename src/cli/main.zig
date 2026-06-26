@@ -9,6 +9,8 @@
 const std = @import("std");
 const hush = @import("hush");
 
+const version = "0.0.0-dev";
+
 const usage =
     \\usage:
     \\  hush ping
@@ -16,8 +18,14 @@ const usage =
     \\  hush get <env> <key>
     \\  hush del <env> <key>
     \\  hush ls  <env>
+    \\  hush version
     \\
 ;
+
+fn isHelp(verb: []const u8) bool {
+    const eql = std.mem.eql;
+    return eql(u8, verb, "help") or eql(u8, verb, "--help") or eql(u8, verb, "-h");
+}
 
 pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
@@ -30,6 +38,15 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print("{s}", .{usage});
         return 2;
     };
+
+    if (isHelp(verb)) {
+        std.debug.print("{s}", .{usage});
+        return 0;
+    }
+    if (std.mem.eql(u8, verb, "version") or std.mem.eql(u8, verb, "--version")) {
+        std.debug.print("hush {s}\n", .{version});
+        return 0;
+    }
 
     const req = buildRequest(verb, &args) orelse {
         std.debug.print("{s}", .{usage});
@@ -53,15 +70,21 @@ pub fn main(init: std.process.Init) !u8 {
     var sw = stream.writer(io, &wbuf);
 
     const payload = try hush.protocol.encodeRequest(gpa, req);
-    defer gpa.free(payload);
+    defer freeSecret(gpa, payload);
     try hush.transport.writeFrame(&sw.interface, payload);
 
     const resp_buf = try hush.transport.readFrame(&sr.interface, gpa);
-    defer gpa.free(resp_buf);
+    defer freeSecret(gpa, resp_buf);
     var resp = try hush.protocol.decodeResponse(gpa, resp_buf);
     defer resp.deinit(gpa);
 
     return printResponse(io, verb, resp);
+}
+
+/// Zero a heap buffer that may contain secret material, then free it.
+fn freeSecret(gpa: std.mem.Allocator, buf: []u8) void {
+    hush.crypto.zero(buf);
+    gpa.free(buf);
 }
 
 fn buildRequest(verb: []const u8, args: *std.process.Args.Iterator) ?hush.protocol.Request {

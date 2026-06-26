@@ -30,3 +30,37 @@ pub fn readFrame(r: *std.Io.Reader, allocator: std.mem.Allocator) ![]u8 {
     try r.readSliceAll(buf);
     return buf;
 }
+
+// --- tests -------------------------------------------------------------------
+
+test "frame roundtrip" {
+    const a = std.testing.allocator;
+    var buf: [256]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try writeFrame(&w, "hello world");
+
+    var r = std.Io.Reader.fixed(w.buffered());
+    const got = try readFrame(&r, a);
+    defer a.free(got);
+    try std.testing.expectEqualStrings("hello world", got);
+}
+
+test "empty frame roundtrip" {
+    const a = std.testing.allocator;
+    var buf: [16]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try writeFrame(&w, "");
+
+    var r = std.Io.Reader.fixed(w.buffered());
+    const got = try readFrame(&r, a);
+    defer a.free(got);
+    try std.testing.expectEqual(@as(usize, 0), got.len);
+}
+
+test "truncated frame yields EndOfStream" {
+    const a = std.testing.allocator;
+    // length prefix says 5 bytes, but only 2 follow
+    const bad = [_]u8{ 5, 0, 0, 0, 'h', 'i' };
+    var r = std.Io.Reader.fixed(&bad);
+    try std.testing.expectError(error.EndOfStream, readFrame(&r, a));
+}
