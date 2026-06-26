@@ -49,12 +49,25 @@ never touch disk and the daemon is the only thing that ever held them decrypted:
 hush set dev DATABASE_URL postgres://localhost/app
 hush set dev STRIPE_KEY sk_test_123
 
-hush run --env=dev -- node server.js     # server.js sees DATABASE_URL + STRIPE_KEY
-hush run --env=dev -- printenv STRIPE_KEY # -> sk_test_123
+hush -- node server.js          # implicit env (defaults to dev); injects both secrets
+hush --env=prod -- ./deploy.sh  # explicit env
+hush -- printenv STRIPE_KEY     # -> sk_test_123
 ```
 
 The command inherits your normal environment with the env's secrets layered on top,
-and `hush` exits with the command's exit code.
+and `hush` exits with the command's exit code. The env defaults to `$HUSH_ENV`, then
+`dev`, so most of the time it's just `hush -- <cmd>`.
+
+To load secrets into your **current** shell instead of a child process (like
+`ssh-agent` or `brew shellenv`):
+
+```sh
+eval "$(hush env)"              # or: source <(hush env --env=prod)
+```
+
+`hush -- <cmd>` is preferred — the secrets live only in the child process and vanish
+when it exits. `eval "$(hush env)"` is handy for interactive sessions but the secrets
+then persist in your shell and leak into everything it spawns.
 
 ## Architecture
 
