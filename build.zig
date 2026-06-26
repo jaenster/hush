@@ -54,6 +54,25 @@ pub fn build(b: *std.Build) void {
     cli.root_module.linkSystemLibrary("sodium", .{ .preferred_link_mode = .static });
     b.installArtifact(cli);
 
+    // Menu bar UI: hush-bar (AppKit via the Objective-C runtime)
+    const ui = b.addExecutable(.{
+        .name = "hush-bar",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/ui/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "hush", .module = core }},
+        }),
+    });
+    ui.root_module.addIncludePath(.{ .cwd_relative = brew_include });
+    ui.root_module.addLibraryPath(.{ .cwd_relative = brew_lib });
+    ui.root_module.linkSystemLibrary("sodium", .{ .preferred_link_mode = .static });
+    ui.root_module.linkSystemLibrary("objc", .{});
+    ui.root_module.linkFramework("AppKit", .{});
+    ui.root_module.linkFramework("Foundation", .{});
+    b.installArtifact(ui);
+
     // `zig build run-daemon`
     const run_daemon = b.addRunArtifact(daemon);
     run_daemon.step.dependOn(b.getInstallStep());

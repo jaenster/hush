@@ -35,7 +35,12 @@ Daemon (`src/daemon/`):
 | `cf.zig` | CoreFoundation + Security framework FFI |
 | `providers.zig` | `op://` / `keeper://` reference resolution |
 
-CLI (`src/cli/main.zig`): argument dispatch, the `run` wrapper, `env` output.
+CLI (`src/cli/main.zig`): argument dispatch, the `run` wrapper, `env`/`import`.
+
+Menu bar app (`src/ui/main.zig`, `hush-bar`): a pure-Zig macOS menu bar app
+driving AppKit (`NSStatusItem`/`NSMenu`) through the Objective-C runtime
+(`objc_msgSend`). It's just another socket client — it pings the daemon to show
+status. No Swift.
 
 ## Request flow
 
