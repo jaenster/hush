@@ -16,7 +16,18 @@ pub fn main(init: std.process.Init) !u8 {
     var args = init.minimal.args.iterate();
     _ = args.skip(); // argv[0]
     while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--ephemeral")) kind = .ephemeral;
+        if (std.mem.eql(u8, arg, "--touch-id")) {
+            kind = .touch_id;
+        } else if (std.mem.eql(u8, arg, "--secure-enclave")) {
+            kind = .secure_enclave;
+        } else if (std.mem.eql(u8, arg, "--keychain")) {
+            kind = .keychain;
+        } else if (std.mem.eql(u8, arg, "--ephemeral")) {
+            kind = .ephemeral;
+        } else {
+            log.err("unknown argument: {s}", .{arg});
+            return 2;
+        }
     }
 
     try hush.crypto.init();
@@ -25,8 +36,10 @@ pub fn main(init: std.process.Init) !u8 {
     defer paths.deinit();
     try paths.ensureDir(io);
 
-    const key = key_provider.acquire(kind) catch |err| {
-        log.err("could not acquire data key ({t}); is the keychain accessible?", .{err});
+    const key = key_provider.acquire(kind, io, gpa, paths.wrapped_key) catch |err| {
+        log.err("could not acquire data key ({t})", .{err});
+        if (kind == .secure_enclave)
+            log.err("--secure-enclave needs a code-signed build with a keychain entitlement; use --touch-id for biometric gating on unsigned builds", .{});
         return 1;
     };
     var store = hush.store.Store.init(gpa, key);
@@ -50,6 +63,8 @@ pub fn main(init: std.process.Init) !u8 {
 
     log.info("listening on {s}", .{paths.socket});
     switch (kind) {
+        .touch_id => log.info("data key: Keychain + Touch ID (user presence required, reboot-safe)", .{}),
+        .secure_enclave => log.info("data key: Secure Enclave (Touch ID gated, reboot-safe)", .{}),
         .keychain => log.info("data key: macOS Keychain (device-bound, reboot-safe)", .{}),
         .ephemeral => log.warn("ephemeral key in use: secrets will NOT survive a restart", .{}),
     }

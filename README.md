@@ -6,8 +6,8 @@ small CLI talks to a background daemon over a `0600` unix domain socket.
 
 > **Status: early MVP.** The daemon, CLI, wire protocol, encrypted store, memory
 > hygiene, and Keychain-backed key storage are implemented and working. Secrets
-> survive restarts and reboots. Touch ID gating is the next step — see
-> [Limitations](#limitations).
+> survive restarts and reboots. Touch ID gating is implemented but needs a
+> code-signed build — see [Key providers](#key-providers).
 
 ## Why
 
@@ -60,7 +60,7 @@ Source layout (`src/`):
 | `transport.zig` | length-prefixed framing over the socket |
 | `store.zig` | `mlock`'d map + atomic encrypted-file persistence |
 | `paths.zig` | filesystem locations |
-| `daemon/` | `hushd`, `key_provider.zig` (seam), `keychain.zig` (Security.framework) |
+| `daemon/` | `hushd`, `key_provider.zig` (seam), `keychain.zig` / `enclave.zig` (key storage), `cf.zig` (CoreFoundation + Security FFI) |
 | `cli/` | `hush` |
 
 ## Wire protocol
@@ -78,6 +78,32 @@ field             = u16_le len | bytes
 `op`: ping=0, set=1, get=2, del=3, list=4.
 `status`: ok=0, err=1, not_found=2.
 
+## Key providers
+
+The data key that encrypts the vault is acquired one of four ways (`hushd <flag>`):
+
+| flag | key storage | Touch ID | signed build? |
+|-|-|-|-|
+| `--keychain` *(default)* | login Keychain, device-bound | no | no |
+| `--touch-id` | Keychain item with a `UserPresence` access control | every unlock | **yes** |
+| `--secure-enclave` | data key wrapped by a Secure Enclave key | every unlock | **yes** |
+| `--ephemeral` | random key in memory (survives nothing) | — | no |
+
+The two Touch ID providers use the macOS *data-protection keychain* / Secure
+Enclave, which reject access from binaries without a keychain entitlement bound to
+a valid Apple Developer Team ID — an unsigned or ad-hoc build gets
+`errSecMissingEntitlement` (-34018). To enable them:
+
+```sh
+# 1. put your Team ID in hush.entitlements (replace TEAMID)
+# 2. sign the binary
+scripts/sign.sh "Apple Development: you@example.com (XXXXXXXXXX)"
+# 3. run
+hushd --touch-id
+```
+
+The default `--keychain` provider needs none of this and is what's verified in CI.
+
 ## Security model
 
 - **Encrypted at rest.** The vault is XChaCha20-Poly1305 ciphertext. The data key is
@@ -94,22 +120,24 @@ field             = u16_le len | bytes
 
 This is an MVP. Notably:
 
-- **No Touch ID gating yet.** The data key lives in the Keychain and is released
-  whenever the device is unlocked; there is no per-access biometric approval. The next
-  milestone wraps the data key with a Secure Enclave key under
-  `kSecAccessControlUserPresence`. (`hushd --ephemeral` opts into a throwaway in-memory
-  key that survives nothing — handy for tests.)
+- **Touch ID requires a code-signed build.** Both biometric providers are implemented
+  but the data-protection keychain / Secure Enclave reject unsigned binaries (see
+  [Key providers](#key-providers)). The default `--keychain` provider is the one
+  verified end-to-end here.
 - **Rebuilding `hushd` may prompt once.** The Keychain ACL is bound to the binary's
-  code identity, so a fresh build will trigger a one-time "hushd wants to use a key"
+  code identity, so a fresh build can trigger a one-time "hushd wants to use a key"
   prompt on the next key read — click *Always Allow*. A signed release build has a
-  stable identity and won't.
+  stable identity.
+- Per-environment caching policy (cache low-sensitivity envs, always-prompt for prod)
+  is not implemented; the chosen provider applies to the whole vault.
 - Single client served at a time (sequential accept).
 - No `hush run` wrapper, manifest, audit log or menubar UI yet.
 
 ## Roadmap
 
 1. ✅ Daemon + CLI + socket + `mlock` store + encrypted file
-2. ✅ Keychain-backed data key (reboot-safe) — *next:* Secure Enclave + Touch ID
+2. ✅ Keychain-backed data key (reboot-safe); Touch ID providers implemented
+   (`--touch-id`, `--secure-enclave`) — pending a code-signed build to validate
 3. Audit log + rotation
 4. `.vault.toml` manifest (least-privilege, replaces `.env.example`)
 5. `hush run --env=<e> -- <cmd>` wrapper (inject at `execve`)

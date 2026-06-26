@@ -1,167 +1,128 @@
 //! macOS Keychain storage for the vault data key.
 //!
-//! The 32-byte data key that encrypts the vault is kept as a generic-password
-//! item in the login keychain, accessible only when the device is unlocked and
-//! never synced off-device (`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`).
-//! This makes the key reboot-stable without ever writing it to disk in
-//! plaintext ourselves.
+//! The 32-byte data key is kept as a generic-password item in the login
+//! keychain. Two protection levels:
 //!
-//! Manual bindings to CoreFoundation + Security (linked as frameworks) — we
-//! declare only the handful of symbols we use rather than translate-c the
-//! framework headers. The next milestone wraps this key with a Secure Enclave
-//! key gated by Touch ID; this is the same API family.
+//!   - `.device_only` : accessible whenever the device is unlocked
+//!     (`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`). No prompt.
+//!   - `.touch_id`    : guarded by a `kSecAccessControlUserPresence` access
+//!     control, so every read requires Touch ID (passcode fallback). The
+//!     biometric is enforced by the keychain daemon — unlike Secure Enclave key
+//!     creation (`enclave.zig`), this needs no code-signing entitlement.
+//!
+//! In both cases the key is device-bound, never synced, and never written to
+//! disk in plaintext by us.
 
 const std = @import("std");
 const crypto = @import("hush").crypto;
+const cf = @import("cf.zig");
 
 const log = std.log.scoped(.keychain);
 
 const service = "hush";
-const account = "vault-data-key";
+
+pub const Protection = enum { device_only, touch_id };
 
 pub const Error = error{ KeychainUnexpected, Duplicate };
 
-// --- CoreFoundation / Security FFI -------------------------------------------
-
-const CFTypeRef = ?*anyopaque;
-const CFAllocatorRef = ?*anyopaque;
-const CFIndex = c_long;
-const OSStatus = i32;
-
-const kCFStringEncodingUTF8: u32 = 0x08000100;
-
-const errSecSuccess: OSStatus = 0;
-const errSecItemNotFound: OSStatus = -25300;
-const errSecDuplicateItem: OSStatus = -25299;
-
-// Callback-table structs: we never read their fields, but the type needs the
-// right size so `&kCFType...CallBacks` points at the framework's real global.
-const CFDictionaryKeyCallBacks = extern struct {
-    version: CFIndex,
-    retain: ?*const anyopaque,
-    release: ?*const anyopaque,
-    copyDescription: ?*const anyopaque,
-    equal: ?*const anyopaque,
-    hash: ?*const anyopaque,
-};
-const CFDictionaryValueCallBacks = extern struct {
-    version: CFIndex,
-    retain: ?*const anyopaque,
-    release: ?*const anyopaque,
-    copyDescription: ?*const anyopaque,
-    equal: ?*const anyopaque,
-};
-
-extern const kCFTypeDictionaryKeyCallBacks: CFDictionaryKeyCallBacks;
-extern const kCFTypeDictionaryValueCallBacks: CFDictionaryValueCallBacks;
-extern const kCFBooleanTrue: CFTypeRef;
-
-extern const kSecClass: CFTypeRef;
-extern const kSecClassGenericPassword: CFTypeRef;
-extern const kSecAttrService: CFTypeRef;
-extern const kSecAttrAccount: CFTypeRef;
-extern const kSecValueData: CFTypeRef;
-extern const kSecReturnData: CFTypeRef;
-extern const kSecMatchLimit: CFTypeRef;
-extern const kSecMatchLimitOne: CFTypeRef;
-extern const kSecAttrAccessible: CFTypeRef;
-extern const kSecAttrAccessibleWhenUnlockedThisDeviceOnly: CFTypeRef;
-
-extern fn CFRelease(cf: CFTypeRef) void;
-extern fn CFStringCreateWithCString(alloc: CFAllocatorRef, c_str: [*:0]const u8, encoding: u32) CFTypeRef;
-extern fn CFDataCreate(alloc: CFAllocatorRef, bytes: [*]const u8, length: CFIndex) CFTypeRef;
-extern fn CFDataGetLength(data: CFTypeRef) CFIndex;
-extern fn CFDataGetBytePtr(data: CFTypeRef) [*]const u8;
-extern fn CFDictionaryCreate(
-    alloc: CFAllocatorRef,
-    keys: [*]const CFTypeRef,
-    values: [*]const CFTypeRef,
-    num_values: CFIndex,
-    key_cb: *const CFDictionaryKeyCallBacks,
-    value_cb: *const CFDictionaryValueCallBacks,
-) CFTypeRef;
-
-extern fn SecItemAdd(attributes: CFTypeRef, result: ?*CFTypeRef) OSStatus;
-extern fn SecItemCopyMatching(query: CFTypeRef, result: ?*CFTypeRef) OSStatus;
-
-// --- helpers -----------------------------------------------------------------
-
-fn cfString(s: [*:0]const u8) !CFTypeRef {
-    return CFStringCreateWithCString(null, s, kCFStringEncodingUTF8) orelse Error.KeychainUnexpected;
+/// Distinct items per protection level so the two never collide.
+fn account(protection: Protection) [*:0]const u8 {
+    return switch (protection) {
+        .device_only => "vault-data-key",
+        .touch_id => "vault-data-key-touchid",
+    };
 }
 
-fn makeDict(keys: []const CFTypeRef, values: []const CFTypeRef) !CFTypeRef {
-    std.debug.assert(keys.len == values.len);
-    return CFDictionaryCreate(
-        null,
-        keys.ptr,
-        values.ptr,
-        @intCast(keys.len),
-        &kCFTypeDictionaryKeyCallBacks,
-        &kCFTypeDictionaryValueCallBacks,
-    ) orelse Error.KeychainUnexpected;
-}
+/// Read the stored data key into `out`. Returns false if no item exists. For a
+/// `.touch_id` item this triggers the Touch ID prompt.
+pub fn load(out: *crypto.Key, protection: Protection) !bool {
+    const svc = try cf.cfString(service);
+    defer cf.CFRelease(svc);
+    const acct = try cf.cfString(account(protection));
+    defer cf.CFRelease(acct);
 
-// --- public API --------------------------------------------------------------
+    const keys = [_]cf.TypeRef{ cf.kSecClass, cf.kSecAttrService, cf.kSecAttrAccount, cf.kSecReturnData, cf.kSecMatchLimit };
+    const vals = [_]cf.TypeRef{ cf.kSecClassGenericPassword, svc, acct, cf.kCFBooleanTrue, cf.kSecMatchLimitOne };
+    const query = try cf.makeDict(&keys, &vals);
+    defer cf.CFRelease(query);
 
-/// Read the stored data key into `out`. Returns false if no item exists.
-pub fn load(out: *crypto.Key) !bool {
-    const svc = try cfString(service);
-    defer CFRelease(svc);
-    const acct = try cfString(account);
-    defer CFRelease(acct);
-
-    const keys = [_]CFTypeRef{ kSecClass, kSecAttrService, kSecAttrAccount, kSecReturnData, kSecMatchLimit };
-    const vals = [_]CFTypeRef{ kSecClassGenericPassword, svc, acct, kCFBooleanTrue, kSecMatchLimitOne };
-    const query = try makeDict(&keys, &vals);
-    defer CFRelease(query);
-
-    var result: CFTypeRef = null;
-    const status = SecItemCopyMatching(query, &result);
-    if (status == errSecItemNotFound) return false;
-    if (status != errSecSuccess) {
+    var result: cf.TypeRef = null;
+    const status = cf.SecItemCopyMatching(query, &result);
+    if (status == cf.errSecItemNotFound) return false;
+    if (status != cf.errSecSuccess) {
         log.err("SecItemCopyMatching failed: OSStatus {d}", .{status});
         return Error.KeychainUnexpected;
     }
-    defer CFRelease(result);
+    defer cf.CFRelease(result);
 
-    if (CFDataGetLength(result) != crypto.key_len) return Error.KeychainUnexpected;
-    @memcpy(out, CFDataGetBytePtr(result)[0..crypto.key_len]);
+    if (cf.CFDataGetLength(result) != crypto.key_len) return Error.KeychainUnexpected;
+    @memcpy(out, cf.CFDataGetBytePtr(result)[0..crypto.key_len]);
     return true;
 }
 
 /// Store `key` as a new keychain item. Fails with `Duplicate` if one exists.
-pub fn store(key: crypto.Key) !void {
-    const svc = try cfString(service);
-    defer CFRelease(svc);
-    const acct = try cfString(account);
-    defer CFRelease(acct);
-    const data = CFDataCreate(null, &key, crypto.key_len) orelse return Error.KeychainUnexpected;
-    defer CFRelease(data);
+pub fn store(key: crypto.Key, protection: Protection) !void {
+    const svc = try cf.cfString(service);
+    defer cf.CFRelease(svc);
+    const acct = try cf.cfString(account(protection));
+    defer cf.CFRelease(acct);
+    const data = try cf.cfData(&key);
+    defer cf.CFRelease(data);
 
-    const keys = [_]CFTypeRef{ kSecClass, kSecAttrService, kSecAttrAccount, kSecValueData, kSecAttrAccessible };
-    const vals = [_]CFTypeRef{ kSecClassGenericPassword, svc, acct, data, kSecAttrAccessibleWhenUnlockedThisDeviceOnly };
-    const attrs = try makeDict(&keys, &vals);
-    defer CFRelease(attrs);
+    // The 5th attribute selects the protection: a plain accessibility constant,
+    // or a user-presence access control (Touch ID).
+    var access: cf.TypeRef = null;
+    defer if (access) |a| cf.CFRelease(a);
+    var guard_key: cf.TypeRef = undefined;
+    var guard_val: cf.TypeRef = undefined;
+    switch (protection) {
+        .device_only => {
+            guard_key = cf.kSecAttrAccessible;
+            guard_val = cf.kSecAttrAccessibleWhenUnlockedThisDeviceOnly;
+        },
+        .touch_id => {
+            var ac_err: cf.TypeRef = null;
+            access = cf.SecAccessControlCreateWithFlags(
+                null,
+                cf.kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+                cf.ac_user_presence,
+                &ac_err,
+            ) orelse {
+                if (ac_err) |e| {
+                    log.err("SecAccessControlCreateWithFlags failed: CFError {d}", .{cf.CFErrorGetCode(e)});
+                    cf.CFRelease(e);
+                }
+                return Error.KeychainUnexpected;
+            };
+            guard_key = cf.kSecAttrAccessControl;
+            guard_val = access;
+        },
+    }
 
-    const status = SecItemAdd(attrs, null);
-    if (status == errSecDuplicateItem) return Error.Duplicate;
-    if (status != errSecSuccess) {
+    const keys = [_]cf.TypeRef{ cf.kSecClass, cf.kSecAttrService, cf.kSecAttrAccount, cf.kSecValueData, guard_key };
+    const vals = [_]cf.TypeRef{ cf.kSecClassGenericPassword, svc, acct, data, guard_val };
+    const attrs = try cf.makeDict(&keys, &vals);
+    defer cf.CFRelease(attrs);
+
+    const status = cf.SecItemAdd(attrs, null);
+    if (status == cf.errSecDuplicateItem) return Error.Duplicate;
+    if (status != cf.errSecSuccess) {
         log.err("SecItemAdd failed: OSStatus {d}", .{status});
         return Error.KeychainUnexpected;
     }
 }
 
 /// Return the existing data key, or generate, store, and return a new one.
-pub fn loadOrCreate() !crypto.Key {
+/// First-time creation never prompts; subsequent reads of a `.touch_id` item do.
+pub fn loadOrCreate(protection: Protection) !crypto.Key {
     var k: crypto.Key = undefined;
-    if (try load(&k)) return k;
+    if (try load(&k, protection)) return k;
 
     k = crypto.randomKey();
-    store(k) catch |err| switch (err) {
+    store(k, protection) catch |err| switch (err) {
         // Lost a race with another instance; the other one's key wins.
         Error.Duplicate => {
-            if (try load(&k)) return k;
+            if (try load(&k, protection)) return k;
             return err;
         },
         else => return err,

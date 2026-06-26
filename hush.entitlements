@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements required for the Touch ID key providers (`hushd --touch-id` and
+  `hushd --secure-enclave`). The data-protection keychain and Secure Enclave
+  reject access from binaries that lack a keychain entitlement bound to a valid
+  Apple Developer Team ID — ad-hoc/self-signed builds get errSecMissingEntitlement
+  (-34018).
+
+  Replace TEAMID with your 10-character Apple Developer Team ID, then sign:
+    scripts/sign.sh "<signing-identity>"
+
+  The plain `hushd --keychain` (default) needs none of this.
+-->
+<plist version="1.0">
+<dict>
+  <key>com.apple.application-identifier</key>
+  <string>TEAMID.info.stoots.hush</string>
+  <key>keychain-access-groups</key>
+  <array>
+    <string>TEAMID.info.stoots.hush</string>
+  </array>
+</dict>
+</plist>

@@ -18,6 +18,8 @@ pub const Paths = struct {
     base: []u8,
     socket: []u8,
     vault: []u8,
+    /// SEP-wrapped data key blob (Touch ID provider).
+    wrapped_key: []u8,
 
     pub fn init(allocator: std.mem.Allocator) !Paths {
         const home_z = c.getenv("HOME") orelse return Error.NoHome;
@@ -28,14 +30,17 @@ pub const Paths = struct {
         const socket = try std.fs.path.join(allocator, &.{ base, "hushd.sock" });
         errdefer allocator.free(socket);
         const vault = try std.fs.path.join(allocator, &.{ base, "vault.bin" });
+        errdefer allocator.free(vault);
+        const wrapped_key = try std.fs.path.join(allocator, &.{ base, "datakey.sep" });
 
-        return .{ .allocator = allocator, .base = base, .socket = socket, .vault = vault };
+        return .{ .allocator = allocator, .base = base, .socket = socket, .vault = vault, .wrapped_key = wrapped_key };
     }
 
     pub fn deinit(self: *Paths) void {
         self.allocator.free(self.base);
         self.allocator.free(self.socket);
         self.allocator.free(self.vault);
+        self.allocator.free(self.wrapped_key);
         self.* = undefined;
     }
 
