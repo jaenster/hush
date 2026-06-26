@@ -17,7 +17,7 @@ pub fn build(b: *std.Build) void {
     });
     core.addIncludePath(.{ .cwd_relative = brew_include });
     core.addLibraryPath(.{ .cwd_relative = brew_lib });
-    core.linkSystemLibrary("sodium", .{});
+    core.linkSystemLibrary("sodium", .{ .preferred_link_mode = .static });
 
     // Daemon: hushd
     const daemon = b.addExecutable(.{
@@ -32,7 +32,7 @@ pub fn build(b: *std.Build) void {
     });
     daemon.root_module.addIncludePath(.{ .cwd_relative = brew_include });
     daemon.root_module.addLibraryPath(.{ .cwd_relative = brew_lib });
-    daemon.root_module.linkSystemLibrary("sodium", .{});
+    daemon.root_module.linkSystemLibrary("sodium", .{ .preferred_link_mode = .static });
     // Keychain storage for the vault data key.
     daemon.root_module.linkFramework("CoreFoundation", .{});
     daemon.root_module.linkFramework("Security", .{});
@@ -51,7 +51,7 @@ pub fn build(b: *std.Build) void {
     });
     cli.root_module.addIncludePath(.{ .cwd_relative = brew_include });
     cli.root_module.addLibraryPath(.{ .cwd_relative = brew_lib });
-    cli.root_module.linkSystemLibrary("sodium", .{});
+    cli.root_module.linkSystemLibrary("sodium", .{ .preferred_link_mode = .static });
     b.installArtifact(cli);
 
     // `zig build run-daemon`

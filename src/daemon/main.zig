@@ -102,11 +102,17 @@ fn handleConn(
     const w = &sw.interface;
 
     while (true) {
-        const payload = try hush.transport.readFrame(r, gpa);
-        defer freeSecret(gpa, payload);
+        // Per-request scratch: small requests/responses are served entirely from
+        // the stack; only oversized values (rare) spill to the heap. Persistent
+        // store data still uses the daemon's gpa, not this.
+        var sfa = std.heap.stackFallback(16 * 1024, gpa);
+        const a = sfa.get();
 
-        const resp = try handleRequest(io, gpa, store, paths, payload);
-        defer freeSecret(gpa, resp);
+        const payload = try hush.transport.readFrame(r, a);
+        defer freeSecret(a, payload);
+
+        const resp = try handleRequest(io, a, store, paths, payload);
+        defer freeSecret(a, resp);
 
         try hush.transport.writeFrame(w, resp);
     }
