@@ -94,7 +94,12 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/daemon/providers.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{.{ .name = "hush", .module = core }},
     });
+    providers_mod.addIncludePath(.{ .cwd_relative = brew_include });
+    providers_mod.addLibraryPath(.{ .cwd_relative = brew_lib });
+    providers_mod.linkSystemLibrary("sodium", .{ .preferred_link_mode = .static });
     const providers_tests = b.addTest(.{ .root_module = providers_mod });
     const run_providers_tests = b.addRunArtifact(providers_tests);
 

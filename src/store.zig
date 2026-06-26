@@ -9,12 +9,27 @@
 const std = @import("std");
 const crypto = @import("crypto.zig");
 
-const magic = "HUSH1\n";
+const magic = "HUSH2\n"; // current on-disk format
+const magic_v1 = "HUSH1\n"; // pre-includes; still readable
 
 pub const Store = struct {
     allocator: std.mem.Allocator,
     key: crypto.Key,
     entries: std.StringHashMapUnmanaged(Entry) = .{},
+    /// env -> ordered list of include directives. Not secret (references, not
+    /// values); expanded into many vars at dump time by the daemon.
+    includes: std.StringHashMapUnmanaged(IncludeList) = .{},
+
+    const IncludeList = std.ArrayListUnmanaged(Include);
+
+    /// One include directive. `mode` is an opaque string ("dotenv"/"json"/
+    /// "enumerate") interpreted by the daemon's provider layer — the store
+    /// stays agnostic. All three slices are owned.
+    pub const Include = struct {
+        ref: []u8,
+        mode: []u8,
+        prefix: []u8,
+    };
 
     const Entry = struct {
         /// "env\x00name", owned, used as the map key. Not secret.
@@ -39,8 +54,23 @@ pub const Store = struct {
         var it = self.entries.iterator();
         while (it.next()) |kv| self.freeEntry(kv.value_ptr.*);
         self.entries.deinit(self.allocator);
+
+        var iit = self.includes.iterator();
+        while (iit.next()) |kv| {
+            for (kv.value_ptr.items) |inc| self.freeInclude(inc);
+            kv.value_ptr.deinit(self.allocator);
+            self.allocator.free(kv.key_ptr.*);
+        }
+        self.includes.deinit(self.allocator);
+
         crypto.zero(&self.key);
         self.* = undefined;
+    }
+
+    fn freeInclude(self: *Store, inc: Include) void {
+        self.allocator.free(inc.ref);
+        self.allocator.free(inc.mode);
+        self.allocator.free(inc.prefix);
     }
 
     fn freeEntry(self: *Store, e: Entry) void {
@@ -130,6 +160,60 @@ pub const Store = struct {
         return out.toOwnedSlice(allocator);
     }
 
+    // --- includes ------------------------------------------------------------
+
+    /// Add (or update, if `ref` already present) an include directive for `env`.
+    pub fn addInclude(self: *Store, env: []const u8, ref: []const u8, mode: []const u8, prefix: []const u8) !void {
+        const gop = try self.includes.getOrPut(self.allocator, env);
+        if (!gop.found_existing) {
+            errdefer _ = self.includes.remove(env);
+            gop.key_ptr.* = try self.allocator.dupe(u8, env);
+            gop.value_ptr.* = .empty;
+        }
+        const inc_list = gop.value_ptr;
+
+        const new_ref = try self.allocator.dupe(u8, ref);
+        errdefer self.allocator.free(new_ref);
+        const new_mode = try self.allocator.dupe(u8, mode);
+        errdefer self.allocator.free(new_mode);
+        const new_prefix = try self.allocator.dupe(u8, prefix);
+        errdefer self.allocator.free(new_prefix);
+
+        for (inc_list.items) |*inc| {
+            if (std.mem.eql(u8, inc.ref, ref)) {
+                // Same reference: replace mode/prefix in place, keep order.
+                self.allocator.free(inc.mode);
+                self.allocator.free(inc.prefix);
+                self.allocator.free(new_ref);
+                inc.mode = new_mode;
+                inc.prefix = new_prefix;
+                return;
+            }
+        }
+        try inc_list.append(self.allocator, .{ .ref = new_ref, .mode = new_mode, .prefix = new_prefix });
+    }
+
+    /// Remove the include with the given `ref` from `env`. Returns whether one
+    /// was removed.
+    pub fn delInclude(self: *Store, env: []const u8, ref: []const u8) bool {
+        const inc_list = self.includes.getPtr(env) orelse return false;
+        for (inc_list.items, 0..) |inc, i| {
+            if (std.mem.eql(u8, inc.ref, ref)) {
+                self.freeInclude(inc);
+                _ = inc_list.orderedRemove(i);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Include directives for `env`, in order. Caller owns the slice; the
+    /// Include fields borrow from the store.
+    pub fn listIncludes(self: *Store, allocator: std.mem.Allocator, env: []const u8) ![]Include {
+        const inc_list = self.includes.getPtr(env) orelse return allocator.alloc(Include, 0);
+        return allocator.dupe(Include, inc_list.items);
+    }
+
     // --- persistence ---------------------------------------------------------
 
     /// Serialize+encrypt the whole store and write atomically to `path`.
@@ -147,6 +231,22 @@ pub const Store = struct {
             try appendLenPrefixed(&plain, self.allocator, e.env());
             try appendLenPrefixed(&plain, self.allocator, e.name());
             try appendLenPrefixed(&plain, self.allocator, e.value);
+        }
+
+        // Includes section (per env, in order).
+        var inc_total: u32 = 0;
+        var iit = self.includes.iterator();
+        while (iit.next()) |kv| inc_total += @intCast(kv.value_ptr.items.len);
+        try appendU32(&plain, self.allocator, inc_total);
+        iit = self.includes.iterator();
+        while (iit.next()) |kv| {
+            const env = kv.key_ptr.*;
+            for (kv.value_ptr.items) |inc| {
+                try appendLenPrefixed(&plain, self.allocator, env);
+                try appendLenPrefixed(&plain, self.allocator, inc.ref);
+                try appendLenPrefixed(&plain, self.allocator, inc.mode);
+                try appendLenPrefixed(&plain, self.allocator, inc.prefix);
+            }
         }
 
         const blob = try crypto.seal(self.allocator, self.key, plain.items);
@@ -170,8 +270,9 @@ pub const Store = struct {
             self.allocator.free(plain);
         }
 
-        if (!std.mem.startsWith(u8, plain, magic)) return error.BadVaultFormat;
-        var cur = Reader{ .buf = plain, .pos = magic.len };
+        const has_includes = std.mem.startsWith(u8, plain, magic);
+        if (!has_includes and !std.mem.startsWith(u8, plain, magic_v1)) return error.BadVaultFormat;
+        var cur = Reader{ .buf = plain, .pos = magic.len }; // both magics are the same length
         const count = try cur.u32v();
         var i: u32 = 0;
         while (i < count) : (i += 1) {
@@ -179,6 +280,17 @@ pub const Store = struct {
             const name = try cur.field();
             const value = try cur.field();
             try self.set(env, name, value);
+        }
+
+        if (!has_includes) return; // HUSH1: no includes section
+        const inc_count = try cur.u32v();
+        var j: u32 = 0;
+        while (j < inc_count) : (j += 1) {
+            const env = try cur.field();
+            const ref = try cur.field();
+            const mode = try cur.field();
+            const prefix = try cur.field();
+            try self.addInclude(env, ref, mode, prefix);
         }
     }
 };
@@ -305,6 +417,65 @@ test "load with wrong key fails" {
         var s = Store.init(a, crypto.randomKey()); // different key
         defer s.deinit();
         try std.testing.expectError(crypto.Error.Decrypt, s.load(io, vault));
+    }
+}
+
+test "includes add/update/del/list" {
+    try crypto.init();
+    const a = std.testing.allocator;
+    var s = Store.init(a, crypto.randomKey());
+    defer s.deinit();
+
+    try s.addInclude("dev", "op://Private/dev-env", "dotenv", "");
+    try s.addInclude("dev", "aws://prod/app", "json", "APP_");
+    // same ref again updates in place (no duplicate)
+    try s.addInclude("dev", "op://Private/dev-env", "dotenv", "X_");
+
+    const incs = try s.listIncludes(a, "dev");
+    defer a.free(incs);
+    try std.testing.expectEqual(@as(usize, 2), incs.len);
+    try std.testing.expectEqualStrings("op://Private/dev-env", incs[0].ref);
+    try std.testing.expectEqualStrings("X_", incs[0].prefix); // updated
+    try std.testing.expectEqualStrings("json", incs[1].mode);
+
+    try std.testing.expect(s.delInclude("dev", "op://Private/dev-env"));
+    try std.testing.expect(!s.delInclude("dev", "op://Private/dev-env"));
+    const incs2 = try s.listIncludes(a, "dev");
+    defer a.free(incs2);
+    try std.testing.expectEqual(@as(usize, 1), incs2.len);
+}
+
+test "save/load roundtrips includes" {
+    try crypto.init();
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const key = crypto.randomKey();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try tmp.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(path);
+    const vault = try std.fmt.allocPrint(a, "{s}/vault.bin", .{path});
+    defer a.free(vault);
+
+    {
+        var s = Store.init(a, key);
+        defer s.deinit();
+        try s.set("dev", "FOO", "bar");
+        try s.addInclude("dev", "op://Private/dev-env", "dotenv", "");
+        try s.addInclude("dev", "ovault://Work", "enumerate", "WORK_");
+        try s.save(io, vault);
+    }
+    {
+        var s = Store.init(a, key);
+        defer s.deinit();
+        try s.load(io, vault);
+        try std.testing.expectEqualStrings("bar", (try s.get("dev", "FOO")).?);
+        const incs = try s.listIncludes(a, "dev");
+        defer a.free(incs);
+        try std.testing.expectEqual(@as(usize, 2), incs.len);
+        try std.testing.expectEqualStrings("ovault://Work", incs[1].ref);
+        try std.testing.expectEqualStrings("WORK_", incs[1].prefix);
     }
 }
 

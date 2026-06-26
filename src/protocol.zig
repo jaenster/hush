@@ -24,8 +24,16 @@ pub const Op = enum(u8) {
     get = 2,
     del = 3,
     list = 4,
-    /// Return all (key, value) pairs for an env — used by `hush run`.
+    /// Return all (key, value) pairs for an env — used by `hush run`. Carries
+    /// the project manifest text (may be empty) so the daemon can layer in its
+    /// declared vars/includes and enforce the allowlist.
     dump = 5,
+    /// Add/update an include directive (one reference -> many vars).
+    include_add = 6,
+    /// Remove an include directive by reference.
+    include_del = 7,
+    /// List an env's include directives (ref, mode, prefix triples).
+    include_list = 8,
     _,
 };
 
@@ -42,7 +50,10 @@ pub const Request = union(Op) {
     get: struct { env: []const u8, key: []const u8 },
     del: struct { env: []const u8, key: []const u8 },
     list: struct { env: []const u8 },
-    dump: struct { env: []const u8 },
+    dump: struct { env: []const u8, manifest: []const u8 = "" },
+    include_add: struct { env: []const u8, ref: []const u8, mode: []const u8, prefix: []const u8 },
+    include_del: struct { env: []const u8, ref: []const u8 },
+    include_list: struct { env: []const u8 },
 };
 
 pub const Error = error{ Malformed, TooLarge, UnknownOp };
@@ -108,7 +119,21 @@ pub fn encodeRequest(allocator: std.mem.Allocator, req: Request) ![]u8 {
             try putField(&list, allocator, d.key);
         },
         .list => |l| try putField(&list, allocator, l.env),
-        .dump => |d| try putField(&list, allocator, d.env),
+        .dump => |d| {
+            try putField(&list, allocator, d.env);
+            try putField(&list, allocator, d.manifest);
+        },
+        .include_add => |a| {
+            try putField(&list, allocator, a.env);
+            try putField(&list, allocator, a.ref);
+            try putField(&list, allocator, a.mode);
+            try putField(&list, allocator, a.prefix);
+        },
+        .include_del => |d| {
+            try putField(&list, allocator, d.env);
+            try putField(&list, allocator, d.ref);
+        },
+        .include_list => |l| try putField(&list, allocator, l.env),
     }
     return list.toOwnedSlice(allocator);
 }
@@ -124,7 +149,10 @@ pub fn decodeRequest(payload: []const u8) Error!Request {
         .get => .{ .get = .{ .env = try cur.field(), .key = try cur.field() } },
         .del => .{ .del = .{ .env = try cur.field(), .key = try cur.field() } },
         .list => .{ .list = .{ .env = try cur.field() } },
-        .dump => .{ .dump = .{ .env = try cur.field() } },
+        .dump => .{ .dump = .{ .env = try cur.field(), .manifest = try cur.field() } },
+        .include_add => .{ .include_add = .{ .env = try cur.field(), .ref = try cur.field(), .mode = try cur.field(), .prefix = try cur.field() } },
+        .include_del => .{ .include_del = .{ .env = try cur.field(), .ref = try cur.field() } },
+        .include_list => .{ .include_list = .{ .env = try cur.field() } },
         _ => Error.UnknownOp,
     };
 }
@@ -203,6 +231,40 @@ test "response roundtrip" {
     try std.testing.expectEqual(@as(usize, 2), resp.fields.items.len);
     try std.testing.expectEqualStrings("FOO", resp.fields.items[0]);
     try std.testing.expectEqualStrings("BAR", resp.fields.items[1]);
+}
+
+test "request roundtrip: include_add/del/list" {
+    const a = std.testing.allocator;
+    {
+        const enc = try encodeRequest(a, .{ .include_add = .{ .env = "dev", .ref = "op://P/note", .mode = "dotenv", .prefix = "APP_" } });
+        defer a.free(enc);
+        const d = try decodeRequest(enc);
+        try std.testing.expectEqualStrings("dev", d.include_add.env);
+        try std.testing.expectEqualStrings("op://P/note", d.include_add.ref);
+        try std.testing.expectEqualStrings("dotenv", d.include_add.mode);
+        try std.testing.expectEqualStrings("APP_", d.include_add.prefix);
+    }
+    {
+        const enc = try encodeRequest(a, .{ .include_del = .{ .env = "dev", .ref = "op://P/note" } });
+        defer a.free(enc);
+        const d = try decodeRequest(enc);
+        try std.testing.expectEqualStrings("op://P/note", d.include_del.ref);
+    }
+    {
+        const enc = try encodeRequest(a, .{ .include_list = .{ .env = "prod" } });
+        defer a.free(enc);
+        try std.testing.expectEqualStrings("prod", (try decodeRequest(enc)).include_list.env);
+    }
+}
+
+test "request roundtrip: dump carries env + manifest" {
+    const a = std.testing.allocator;
+    const man = "env: dev\nvars:\n  PORT: 3000\n";
+    const enc = try encodeRequest(a, .{ .dump = .{ .env = "dev", .manifest = man } });
+    defer a.free(enc);
+    const d = try decodeRequest(enc);
+    try std.testing.expectEqualStrings("dev", d.dump.env);
+    try std.testing.expectEqualStrings(man, d.dump.manifest);
 }
 
 test "decode rejects truncated field" {

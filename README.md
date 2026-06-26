@@ -113,6 +113,49 @@ Built-in: `op://` (1Password), `keeper://` (Keeper), `aws://` (Secrets Manager),
 installed and authenticated in the daemon's environment. Adding another is a
 one-line table entry — see [docs/providers.md](docs/providers.md).
 
+A reference can also expand into a **whole set** of vars — share a team's dev
+config as one 1Password secure note, a JSON secret, or a whole vault, and point
+every machine at it:
+
+```sh
+hush include dev op://Private/myapp-dev --as=dotenv      # a note that is a .env
+hush include prod aws://prod/app --as=json               # one JSON secret → many vars
+hush include dev op://Work --as=enumerate --prefix=WORK_ # a whole vault
+```
+
+Local `hush set` keys override included ones. See
+[docs/providers.md](docs/providers.md#includes-one-reference--many-vars).
+
+### Project manifest (`hush.yaml`)
+
+A `hush.yaml` checked into the repo is the env **contract** — the
+`.env.example` replacement that actually injects. hush walks up from the working
+directory to find it, like git finding `.git`:
+
+```yaml
+# hush.yaml — committed, code-reviewed
+default: dev
+envs:
+  dev:
+    vars:
+      PORT:         3000                     # inline literal — not a secret, lives in git
+      DATABASE_URL: op://Private/db-dev      # provider reference — resolved live
+      STRIPE_KEY:   required                 # real secret — must come from local `hush set`
+    includes:
+      - op://Private/team-dev --as=dotenv    # bulk source
+  prod:
+    vars:
+      DATABASE_URL: op://Private/db-prod
+      STRIPE_KEY:   required
+```
+
+Environments are independent blocks. Non-secret config lives inline; secrets are
+references or `required` slots and never touch the file (use `literal://value`
+to force a literal that looks like a keyword or a reference). A bulk include
+can't inject a process-sensitive var (`PATH`, `LD_PRELOAD`, `NODE_OPTIONS`, …)
+unless the manifest declares it — and since the manifest is reviewed in git,
+that declaration is a four-eyes change. See [docs/manifest.md](docs/manifest.md).
+
 ## Architecture
 
 ```
@@ -132,6 +175,7 @@ Source layout (`src/`):
 | `protocol.zig` | pure encode/decode of the wire messages |
 | `transport.zig` | length-prefixed framing over the socket |
 | `store.zig` | `mlock`'d map + atomic encrypted-file persistence |
+| `manifest.zig` | parse `hush.yaml` (the committed env contract) |
 | `paths.zig` | filesystem locations |
 | `daemon/` | `hushd`, `key_provider.zig` (seam), `keychain.zig` / `enclave.zig` (key storage), `cf.zig` (CoreFoundation + Security FFI) |
 | `cli/` | `hush` |
@@ -151,7 +195,10 @@ field             = u32_le len | bytes
 Keys must be valid env var names (`[A-Za-z_][A-Za-z0-9_]*`); the daemon rejects
 anything else at `set`, since keys are injected as environment variables.
 
-`op`: ping=0, set=1, get=2, del=3, list=4, dump=5 (all pairs in an env, for `run`).
+`op`: ping=0, set=1, get=2, del=3, list=4, dump=5 (all pairs in an env, for
+`run`; carries the project manifest text so the daemon layers in its declared
+vars/includes and enforces the allowlist), include_add=6, include_del=7,
+include_list=8.
 `status`: ok=0, err=1, not_found=2.
 
 ## Key providers
@@ -209,7 +256,7 @@ This is an MVP. Notably:
 - Single client served at a time (sequential accept) — a client that connects and
   stalls without sending wedges the daemon for others until it disconnects. Needs
   per-connection concurrency + a thread-safe store to fix.
-- No `hush run` wrapper, manifest, audit log or menubar UI yet.
+- No audit log or menubar UI yet.
 
 ## Roadmap
 
@@ -218,7 +265,8 @@ This is an MVP. Notably:
    (`--touch-id`, `--secure-enclave`) — pending a code-signed build to validate
 3. ✅ `hush run --env=<e> -- <cmd>` wrapper (inject env, exec the command)
 4. ✅ Provider federation — `op://` (1Password) and `keeper://` (Keeper) references
-5. Audit log + rotation
-6. Project manifest (least-privilege, k8s-flavored, replaces `.env.example`)
+5. ✅ Project manifest (`hush.yaml`): committed env contract, walk-up discovery,
+   inline config + references + `required` slots, allowlist over bulk includes
+6. Audit log + rotation
 7. Per-connection concurrency (fix the sequential-accept wedge)
 8. Menubar UI

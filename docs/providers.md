@@ -47,6 +47,58 @@ A single trailing newline from the CLI is trimmed. Note that `pass` prints the
 whole entry, so structure the entry's first line as the value (or use `gopass`,
 which returns only the secret with `-o`).
 
+## Includes: one reference → many vars
+
+A normal reference resolves to *one* value. An **include** resolves to a whole
+**set** of vars — the env-manager move that a password manager has no concept
+of. The unit you share with a team isn't a secret, it's the set: put the dev
+config in one shared 1Password secure note (or a JSON secret, or a whole vault),
+point every machine's hush at it, and rotation happens once at the source. The
+expanded secrets are **never written to hush's disk** — only the directive is.
+
+```sh
+# A shared secure note whose body is a .env file:
+hush include dev op://Private/myapp-dev --as=dotenv
+
+# A JSON secret (AWS Secrets Manager, Vault, an op note holding JSON):
+hush include prod aws://prod/app-secrets --as=json
+
+# A whole container, every item prefixed (prefix is required, see below):
+hush include dev op://Work --as=enumerate --prefix=WORK_
+
+hush includes dev            # list directives
+hush exclude  dev op://Work  # remove one
+```
+
+Modes — all three differ only in how the provider output becomes pairs:
+
+| `--as=` | provider returns | parsed as |
+|-|-|-|
+| `dotenv` *(default)* | a text blob of `KEY=value` lines | the `.env` parser |
+| `json` | a JSON object | each top-level key → a var (scalars stringified) |
+| `enumerate` | a whole container | the provider's `list_argv` recipe, as `KEY=value` lines |
+
+`dotenv` and `json` reuse the provider's normal read recipe, so they work for
+**any** provider that returns text or JSON — including AWS/Vault, whose natural
+unit is already a multi-field blob. `enumerate` needs a per-provider
+whole-container recipe (`list_argv`); it's wired generically but ships without a
+built-in recipe, so for now it's used with a custom registry entry.
+
+**Precedence** (config-style): includes layer in the order added (a later
+include overrides an earlier one), and an env's own `hush set` keys override all
+includes. So a shared note gives the defaults; a local `hush set` is the
+override.
+
+**Safety**: a key from a remote source that isn't a valid env var name is
+skipped, never injected. `enumerate` (whole container) **requires** `--prefix`,
+since dumping a vault flat invites name collisions and junk names. And note the
+trust boundary — whoever can edit an included note/vault can set any env var in
+your processes, so only include sources you control (don't `--as` an untrusted
+note into a prod run).
+
+Includes are nested one level deep only: an included `.env` body is not itself
+re-scanned for includes.
+
 ## Requirements
 
 The provider CLI must be **installed and authenticated in the daemon's

@@ -176,34 +176,198 @@ fn handleRequest(
             defer gpa.free(names);
             return proto.encodeResponse(gpa, .ok, names);
         },
-        .dump => |d| {
-            const pairs = try store.dump(gpa, d.env);
-            defer gpa.free(pairs);
-
-            // Flatten to alternating key, value fields, resolving any references.
+        .dump => |d| return dumpEnv(io, gpa, store, d.env, d.manifest),
+        .include_add => |a| {
+            if (a.env.len == 0)
+                return proto.encodeResponse(gpa, .err, &.{"env name must not be empty"});
+            const mode = providers.parseMode(a.mode) orelse
+                return proto.encodeResponse(gpa, .err, &.{"unknown include mode (use dotenv, json, or enumerate)"});
+            if (!providers.isReference(a.ref))
+                return proto.encodeResponse(gpa, .err, &.{"include reference must use a known provider scheme (op://, aws://, vault://, ...)"});
+            if (mode == .enumerate and a.prefix.len == 0)
+                return proto.encodeResponse(gpa, .err, &.{"enumerate (whole-container) includes require a prefix to avoid name collisions"});
+            store.addInclude(a.env, a.ref, a.mode, a.prefix) catch |e| return errResp(gpa, e);
+            store.save(io, paths.vault) catch |e| return errResp(gpa, e);
+            return proto.encodeResponse(gpa, .ok, &.{});
+        },
+        .include_del => |d| {
+            const existed = store.delInclude(d.env, d.ref);
+            store.save(io, paths.vault) catch |e| return errResp(gpa, e);
+            return proto.encodeResponse(gpa, if (existed) .ok else .not_found, &.{});
+        },
+        .include_list => |l| {
+            const incs = try store.listIncludes(gpa, l.env);
+            defer gpa.free(incs);
             var fields: std.ArrayList([]const u8) = .empty;
             defer fields.deinit(gpa);
-            var resolved_bufs: std.ArrayList([]u8) = .empty;
-            defer {
-                for (resolved_bufs.items) |b| gpa.free(b);
-                resolved_bufs.deinit(gpa);
-            }
-            for (pairs) |p| {
-                try fields.append(gpa, p.name);
-                if (providers.isReference(p.value)) {
-                    const resolved = providers.resolve(gpa, io, p.value) catch |e| {
-                        log.warn("could not resolve reference {s}: {t}", .{ p.value, e });
-                        return proto.encodeResponse(gpa, .err, &.{"failed to resolve a reference in this env (is the provider CLI installed and authenticated?)"});
-                    };
-                    try resolved_bufs.append(gpa, resolved);
-                    try fields.append(gpa, resolved);
-                } else {
-                    try fields.append(gpa, p.value);
-                }
+            for (incs) |inc| {
+                try fields.append(gpa, inc.ref);
+                try fields.append(gpa, inc.mode);
+                try fields.append(gpa, inc.prefix);
             }
             return proto.encodeResponse(gpa, .ok, fields.items);
         },
     }
+}
+
+/// Build the full (key, value) set for an env and return it as an encoded
+/// response. Sources are layered so that *explicit beats bulk* and *local beats
+/// committed*:
+///
+///   1. manifest `includes:`   (committed bulk)   — allowlist-filtered
+///   2. vault include directives (local bulk)      — allowlist-filtered
+///   3. manifest `vars:`       (committed explicit) — always injected
+///   4. vault `hush set` keys  (local explicit)     — always injected
+///
+/// A bulk source may not silently inject a process-sensitive name
+/// (`names.isDangerous`) unless the committed manifest declares it — that
+/// declaration is a reviewed change. References are resolved to real values.
+fn dumpEnv(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    store: *hush.store.Store,
+    env: []const u8,
+    manifest_text: []const u8,
+) ![]u8 {
+    const proto = hush.protocol;
+
+    var man: ?hush.manifest.Manifest = if (manifest_text.len > 0)
+        hush.manifest.parse(gpa, manifest_text) catch |e| {
+            log.warn("could not parse manifest: {t}", .{e});
+            return proto.encodeResponse(gpa, .err, &.{"could not parse hush.yaml"});
+        }
+    else
+        null;
+    defer if (man) |*m| m.deinit();
+
+    const pairs = try store.dump(gpa, env);
+    defer gpa.free(pairs);
+    const incs = try store.listIncludes(gpa, env);
+    defer gpa.free(incs);
+
+    // Ordered so output is stable; a key seen again just overwrites its value.
+    var merged: std.StringArrayHashMapUnmanaged([]const u8) = .empty;
+    defer merged.deinit(gpa);
+
+    // Owned secret material to wipe + free once the response is encoded.
+    var expanded_sets: std.ArrayList([]providers.Pair) = .empty;
+    defer {
+        for (expanded_sets.items) |set| providers.freeExpanded(gpa, set);
+        expanded_sets.deinit(gpa);
+    }
+    var resolved_bufs: std.ArrayList([]u8) = .empty;
+    defer {
+        for (resolved_bufs.items) |b| {
+            hush.crypto.zero(b);
+            gpa.free(b);
+        }
+        resolved_bufs.deinit(gpa);
+    }
+
+    // This env's manifest block (if any): its `vars:` are the allowlist and its
+    // `includes:` are committed bulk sources. Other envs in the file are ignored.
+    const menv: ?*const hush.manifest.Env = if (man) |*m| m.find(env) else null;
+
+    // 1 + 2: bulk includes (manifest first, then vault), allowlist-filtered.
+    if (menv) |e| {
+        for (e.includes) |inc| {
+            const mode = providers.parseMode(inc.mode) orelse {
+                log.warn("manifest include {s}: unknown mode '{s}', skipping", .{ inc.ref, inc.mode });
+                continue;
+            };
+            const set = providers.expand(gpa, io, inc.ref, mode, inc.prefix) catch |er| {
+                log.warn("could not expand manifest include {s} ({s}): {t}", .{ inc.ref, inc.mode, er });
+                return proto.encodeResponse(gpa, .err, &.{"failed to expand a manifest include (is the provider CLI installed and authenticated?)"});
+            };
+            try expanded_sets.append(gpa, set);
+            for (set) |p| try putBulk(gpa, &merged, menv, p.name, p.value);
+        }
+    }
+    for (incs) |inc| {
+        const mode = providers.parseMode(inc.mode) orelse continue; // corrupt directive: skip
+        const set = providers.expand(gpa, io, inc.ref, mode, inc.prefix) catch |e| {
+            log.warn("could not expand include {s} ({s}): {t}", .{ inc.ref, inc.mode, e });
+            return proto.encodeResponse(gpa, .err, &.{"failed to expand an include in this env (is the provider CLI installed and authenticated?)"});
+        };
+        try expanded_sets.append(gpa, set);
+        for (set) |p| try putBulk(gpa, &merged, menv, p.name, p.value);
+    }
+
+    // 3: manifest explicit vars. A `literal://` value is taken verbatim; a
+    // provider reference is resolved; anything else is a bare literal. Slots
+    // (no value) contribute nothing here — the local store fills them in step 4.
+    if (menv) |e| {
+        for (e.vars) |v| {
+            const val = v.value orelse continue;
+            if (!hush.names.isEnvVarName(v.name)) {
+                log.warn("manifest var '{s}': not a valid env var name, skipping", .{v.name});
+                continue;
+            }
+            if (hush.manifest.literalValue(val)) |lit| {
+                try merged.put(gpa, v.name, lit);
+            } else if (providers.isReference(val)) {
+                const resolved = providers.resolve(gpa, io, val) catch |e2| {
+                    log.warn("could not resolve manifest var {s} ({s}): {t}", .{ v.name, val, e2 });
+                    return proto.encodeResponse(gpa, .err, &.{"failed to resolve a manifest reference (is the provider CLI installed and authenticated?)"});
+                };
+                try resolved_bufs.append(gpa, resolved);
+                try merged.put(gpa, v.name, resolved);
+            } else {
+                try merged.put(gpa, v.name, val);
+            }
+        }
+    }
+
+    // 4: local store entries (highest precedence).
+    for (pairs) |p| {
+        if (providers.isReference(p.value)) {
+            const resolved = providers.resolve(gpa, io, p.value) catch |e| {
+                log.warn("could not resolve reference {s}: {t}", .{ p.value, e });
+                return proto.encodeResponse(gpa, .err, &.{"failed to resolve a reference in this env (is the provider CLI installed and authenticated?)"});
+            };
+            try resolved_bufs.append(gpa, resolved);
+            try merged.put(gpa, p.name, resolved);
+        } else {
+            try merged.put(gpa, p.name, p.value);
+        }
+    }
+
+    // Required slots must end up with a value from somewhere.
+    if (menv) |e| {
+        for (e.vars) |v| {
+            if (v.value == null and v.required and !merged.contains(v.name)) {
+                log.warn("required var '{s}' has no value in env '{s}'", .{ v.name, env });
+                return proto.encodeResponse(gpa, .err, &.{"a required manifest var is missing (set it with `hush set <env> <NAME> <value>`)"});
+            }
+        }
+    }
+
+    var fields: std.ArrayList([]const u8) = .empty;
+    defer fields.deinit(gpa);
+    var it = merged.iterator();
+    while (it.next()) |kv| {
+        try fields.append(gpa, kv.key_ptr.*);
+        try fields.append(gpa, kv.value_ptr.*);
+    }
+    return proto.encodeResponse(gpa, .ok, fields.items);
+}
+
+/// Insert a bulk-sourced (key, value) into `merged`, dropping a process-sensitive
+/// name (`names.isDangerous`) that this env's manifest block hasn't declared,
+/// with a warning naming it.
+fn putBulk(
+    gpa: std.mem.Allocator,
+    merged: *std.StringArrayHashMapUnmanaged([]const u8),
+    menv: ?*const hush.manifest.Env,
+    name: []const u8,
+    value: []const u8,
+) !void {
+    const allowed = if (menv) |e| e.declares(name) or !hush.names.isDangerous(name) else !hush.names.isDangerous(name);
+    if (!allowed) {
+        log.warn("dropping process-sensitive var '{s}' from a bulk source (declare it in hush.yaml to allow)", .{name});
+        return;
+    }
+    try merged.put(gpa, name, value);
 }
 
 // --- graceful shutdown -------------------------------------------------------

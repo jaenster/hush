@@ -4,3 +4,6 @@ zig-out/
 
 # macOS
 .DS_Store
+
+# IDE
+.idea/

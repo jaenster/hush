@@ -21,6 +21,10 @@ const usage =
     \\  hush --env=<env> -- <command> [args...]  ... using a specific env
     \\  hush env [--env=<env>] [--format=shell|dotenv]   print secrets for eval or --env-file
     \\  hush import <file.env> [--env=<env>]     bulk-import a .env file
+    \\  hush include <env> <ref> [--as=dotenv|json|enumerate] [--prefix=P]
+    \\                                           expand one reference into many vars
+    \\  hush includes <env>                      list an env's include directives
+    \\  hush exclude <env> <ref>                 remove an include directive
     \\  hush set <env> <key> <value>
     \\  hush get <env> <key>
     \\  hush del <env> <key>
@@ -80,6 +84,15 @@ pub fn main(init: std.process.Init) !u8 {
     if (std.mem.eql(u8, verb, "import")) {
         return importCommand(init, args[1..]);
     }
+    if (std.mem.eql(u8, verb, "include")) {
+        return includeCommand(init, args[1..]);
+    }
+    if (std.mem.eql(u8, verb, "includes")) {
+        return includesCommand(init, args[1..]);
+    }
+    if (std.mem.eql(u8, verb, "exclude")) {
+        return excludeCommand(init, args[1..]);
+    }
 
     // Everything else is "run mode": `hush run -- cmd`, `hush -- cmd`,
     // `hush --env=prod -- cmd`.
@@ -133,6 +146,43 @@ fn connectOrReport(io: std.Io, gpa: std.mem.Allocator) !?std.Io.net.Stream {
     };
 }
 
+/// A discovered manifest file: its absolute path and contents. Not secret
+/// (committed config), but free both with `deinit`.
+const ManifestFile = struct {
+    gpa: std.mem.Allocator,
+    path: []u8,
+    text: []u8,
+
+    fn deinit(self: *ManifestFile) void {
+        self.gpa.free(self.path);
+        self.gpa.free(self.text);
+    }
+};
+
+/// Walk up from the working directory looking for `hush.yaml` / `hush.yml`,
+/// like git finding `.git`. Returns the first one found, or null.
+fn findManifest(io: std.Io, gpa: std.mem.Allocator) !?ManifestFile {
+    var cwd_buf: [4096]u8 = undefined;
+    if (std.c.getcwd(&cwd_buf, cwd_buf.len) == null) return null;
+    const cwd = std.mem.sliceTo(&cwd_buf, 0);
+
+    var dir: []const u8 = cwd;
+    while (true) {
+        for (hush.manifest.filenames) |fname| {
+            const cand = try std.fs.path.join(gpa, &.{ dir, fname });
+            const text = std.Io.Dir.cwd().readFileAlloc(io, cand, gpa, .limited(1 << 20)) catch {
+                gpa.free(cand);
+                continue;
+            };
+            return .{ .gpa = gpa, .path = cand, .text = text };
+        }
+        const parent = std.fs.path.dirname(dir) orelse break;
+        if (parent.len == dir.len) break; // reached the root
+        dir = parent;
+    }
+    return null;
+}
+
 /// `hush [--env=<env>] -- <command> [args...]`: resolve the env's secrets,
 /// inject them into the environment, and exec the command (replacing this
 /// process). The env defaults to $HUSH_ENV, then "dev".
@@ -173,7 +223,16 @@ fn runWrapper(init: std.process.Init, run_args: []const []const u8) !u8 {
         return 2;
     }
 
-    const env_name = env_flag orelse init.environ_map.get("HUSH_ENV") orelse default_env;
+    var mf = try findManifest(io, gpa);
+    defer if (mf) |*m| m.deinit();
+    var man: ?hush.manifest.Manifest = if (mf) |m| (hush.manifest.parse(gpa, m.text) catch null) else null;
+    defer if (man) |*m| m.deinit();
+    if (mf) |m| std.debug.print("hush: using {s}\n", .{m.path});
+
+    // env precedence: --env flag, then $HUSH_ENV, then the manifest default.
+    const manifest_env = if (man) |m| m.default_env else null;
+    const env_name = env_flag orelse init.environ_map.get("HUSH_ENV") orelse manifest_env orelse default_env;
+    const manifest_text: []const u8 = if (mf) |m| m.text else "";
 
     var stream = (try connectOrReport(io, gpa)) orelse return 1;
     defer stream.close(io);
@@ -183,7 +242,7 @@ fn runWrapper(init: std.process.Init, run_args: []const []const u8) !u8 {
     var sr = stream.reader(io, &rbuf);
     var sw = stream.writer(io, &wbuf);
 
-    const payload = try hush.protocol.encodeRequest(gpa, .{ .dump = .{ .env = env_name } });
+    const payload = try hush.protocol.encodeRequest(gpa, .{ .dump = .{ .env = env_name, .manifest = manifest_text } });
     defer gpa.free(payload);
     try hush.transport.writeFrame(&sw.interface, payload);
 
@@ -193,7 +252,8 @@ fn runWrapper(init: std.process.Init, run_args: []const []const u8) !u8 {
     defer resp.deinit(gpa);
 
     if (resp.status != .ok) {
-        std.debug.print("hush: could not resolve env '{s}'\n", .{env_name});
+        const msg = if (resp.fields.items.len > 0) resp.fields.items[0] else "could not resolve env";
+        std.debug.print("hush: {s} (env '{s}')\n", .{ msg, env_name });
         return 1;
     }
 
@@ -262,7 +322,15 @@ fn envCommand(init: std.process.Init, rest: []const []const u8) !u8 {
         }
     }
 
-    const env_name = env_flag orelse init.environ_map.get("HUSH_ENV") orelse default_env;
+    var mf = try findManifest(io, gpa);
+    defer if (mf) |*m| m.deinit();
+    var man: ?hush.manifest.Manifest = if (mf) |m| (hush.manifest.parse(gpa, m.text) catch null) else null;
+    defer if (man) |*m| m.deinit();
+    if (mf) |m| std.debug.print("hush: using {s}\n", .{m.path});
+
+    const manifest_env = if (man) |m| m.default_env else null;
+    const env_name = env_flag orelse init.environ_map.get("HUSH_ENV") orelse manifest_env orelse default_env;
+    const manifest_text: []const u8 = if (mf) |m| m.text else "";
 
     var stream = (try connectOrReport(io, gpa)) orelse return 1;
     defer stream.close(io);
@@ -272,7 +340,7 @@ fn envCommand(init: std.process.Init, rest: []const []const u8) !u8 {
     var sr = stream.reader(io, &rbuf);
     var sw = stream.writer(io, &wbuf);
 
-    const payload = try hush.protocol.encodeRequest(gpa, .{ .dump = .{ .env = env_name } });
+    const payload = try hush.protocol.encodeRequest(gpa, .{ .dump = .{ .env = env_name, .manifest = manifest_text } });
     defer gpa.free(payload);
     try hush.transport.writeFrame(&sw.interface, payload);
 
@@ -282,7 +350,8 @@ fn envCommand(init: std.process.Init, rest: []const []const u8) !u8 {
     defer resp.deinit(gpa);
 
     if (resp.status != .ok) {
-        std.debug.print("hush: could not resolve env '{s}'\n", .{env_name});
+        const msg = if (resp.fields.items.len > 0) resp.fields.items[0] else "could not resolve env";
+        std.debug.print("hush: {s} (env '{s}')\n", .{ msg, env_name });
         return 1;
     }
 
@@ -437,6 +506,157 @@ fn importCommand(init: std.process.Init, rest: []const []const u8) !u8 {
         std.debug.print("imported {d} secret(s) into '{s}'\n", .{ imported, env_name });
     }
     return 0;
+}
+
+/// `hush include <env> <ref> [--as=dotenv|json|enumerate] [--prefix=P]`:
+/// register a directive that expands one provider reference into many env vars
+/// at injection time (a shared secure note, a JSON secret, a whole vault).
+fn includeCommand(init: std.process.Init, rest: []const []const u8) !u8 {
+    const io = init.io;
+    const gpa = init.gpa;
+
+    var env: ?[]const u8 = null;
+    var ref: ?[]const u8 = null;
+    var mode: []const u8 = "dotenv";
+    var prefix: []const u8 = "";
+    var i: usize = 0;
+    while (i < rest.len) : (i += 1) {
+        const a = rest[i];
+        if (std.mem.startsWith(u8, a, "--as=")) {
+            mode = a["--as=".len..];
+        } else if (std.mem.startsWith(u8, a, "--prefix=")) {
+            prefix = a["--prefix=".len..];
+        } else if (std.mem.startsWith(u8, a, "-")) {
+            std.debug.print("hush: unknown option '{s}'\n", .{a});
+            return 2;
+        } else if (env == null) {
+            env = a;
+        } else if (ref == null) {
+            ref = a;
+        } else {
+            std.debug.print("hush: too many arguments\n", .{});
+            return 2;
+        }
+    }
+
+    const env_name = env orelse {
+        std.debug.print("usage: hush include <env> <ref> [--as=dotenv|json|enumerate] [--prefix=P]\n", .{});
+        return 2;
+    };
+    const reference = ref orelse {
+        std.debug.print("usage: hush include <env> <ref> [--as=dotenv|json|enumerate] [--prefix=P]\n", .{});
+        return 2;
+    };
+
+    const req: hush.protocol.Request = .{ .include_add = .{ .env = env_name, .ref = reference, .mode = mode, .prefix = prefix } };
+    var resp = (try sendRequest(io, gpa, req)) orelse return 1;
+    defer resp.deinit();
+    switch (resp.value.status) {
+        .ok => {
+            std.debug.print("added include {s} ({s}) to '{s}'\n", .{ reference, mode, env_name });
+            return 0;
+        },
+        else => return reportErr(resp.value),
+    }
+}
+
+/// `hush includes <env>`: list the env's include directives.
+fn includesCommand(init: std.process.Init, rest: []const []const u8) !u8 {
+    const io = init.io;
+    const gpa = init.gpa;
+
+    if (rest.len < 1) {
+        std.debug.print("usage: hush includes <env>\n", .{});
+        return 2;
+    }
+    const env_name = rest[0];
+
+    var resp = (try sendRequest(io, gpa, .{ .include_list = .{ .env = env_name } })) orelse return 1;
+    defer resp.deinit();
+    if (resp.value.status != .ok) return reportErr(resp.value);
+
+    const fields = resp.value.fields.items;
+    if (fields.len == 0) {
+        std.debug.print("no includes in '{s}'\n", .{env_name});
+        return 0;
+    }
+    var f: usize = 0;
+    while (f + 3 <= fields.len) : (f += 3) {
+        const ref = fields[f];
+        const mode = fields[f + 1];
+        const prefix = fields[f + 2];
+        if (prefix.len == 0) {
+            std.debug.print("{s}  [{s}]\n", .{ ref, mode });
+        } else {
+            std.debug.print("{s}  [{s}]  prefix={s}\n", .{ ref, mode, prefix });
+        }
+    }
+    return 0;
+}
+
+/// `hush exclude <env> <ref>`: remove an include directive.
+fn excludeCommand(init: std.process.Init, rest: []const []const u8) !u8 {
+    const io = init.io;
+    const gpa = init.gpa;
+
+    if (rest.len < 2) {
+        std.debug.print("usage: hush exclude <env> <ref>\n", .{});
+        return 2;
+    }
+    var resp = (try sendRequest(io, gpa, .{ .include_del = .{ .env = rest[0], .ref = rest[1] } })) orelse return 1;
+    defer resp.deinit();
+    switch (resp.value.status) {
+        .ok => {
+            std.debug.print("removed include {s} from '{s}'\n", .{ rest[1], rest[0] });
+            return 0;
+        },
+        .not_found => {
+            std.debug.print("hush: no such include '{s}' in '{s}'\n", .{ rest[1], rest[0] });
+            return 1;
+        },
+        else => return reportErr(resp.value),
+    }
+}
+
+/// A decoded response together with the buffer it borrows from; free both via
+/// `deinit`.
+const OwnedResponse = struct {
+    gpa: std.mem.Allocator,
+    buf: []u8,
+    value: hush.protocol.Response,
+
+    fn deinit(self: *OwnedResponse) void {
+        self.value.deinit(self.gpa);
+        freeSecret(self.gpa, self.buf);
+    }
+};
+
+/// Connect, send one request, and return the decoded response (or null if the
+/// daemon isn't reachable — a message is printed in that case).
+fn sendRequest(io: std.Io, gpa: std.mem.Allocator, req: hush.protocol.Request) !?OwnedResponse {
+    var stream = (try connectOrReport(io, gpa)) orelse return null;
+    defer stream.close(io);
+
+    var rbuf: [4096]u8 = undefined;
+    var wbuf: [4096]u8 = undefined;
+    var sr = stream.reader(io, &rbuf);
+    var sw = stream.writer(io, &wbuf);
+
+    const payload = try hush.protocol.encodeRequest(gpa, req);
+    defer freeSecret(gpa, payload);
+    try hush.transport.writeFrame(&sw.interface, payload);
+
+    const resp_buf = try hush.transport.readFrame(&sr.interface, gpa);
+    errdefer freeSecret(gpa, resp_buf);
+    const value = try hush.protocol.decodeResponse(gpa, resp_buf);
+    return .{ .gpa = gpa, .buf = resp_buf, .value = value };
+}
+
+/// Print an `.err` response's message and return rc 1.
+fn reportErr(resp: hush.protocol.Response) u8 {
+    const msg = if (resp.fields.items.len > 0) resp.fields.items[0] else "unknown error";
+    std.debug.print("hush: {s}\n", .{msg});
+    return 1;
 }
 
 /// Zero a heap buffer that may contain secret material, then free it.
