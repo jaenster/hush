@@ -12,13 +12,23 @@ pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
     const gpa = init.gpa;
 
+    var kind: key_provider.Kind = .keychain;
+    var args = init.minimal.args.iterate();
+    _ = args.skip(); // argv[0]
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--ephemeral")) kind = .ephemeral;
+    }
+
     try hush.crypto.init();
 
     var paths = try hush.paths.Paths.init(gpa);
     defer paths.deinit();
     try paths.ensureDir(io);
 
-    const key = try key_provider.acquire(.ephemeral);
+    const key = key_provider.acquire(kind) catch |err| {
+        log.err("could not acquire data key ({t}); is the keychain accessible?", .{err});
+        return 1;
+    };
     var store = hush.store.Store.init(gpa, key);
     defer store.deinit();
 
@@ -39,7 +49,10 @@ pub fn main(init: std.process.Init) !u8 {
     installSignalHandlers(paths.socket);
 
     log.info("listening on {s}", .{paths.socket});
-    log.warn("ephemeral key in use: secrets will NOT survive a restart (key management pending)", .{});
+    switch (kind) {
+        .keychain => log.info("data key: macOS Keychain (device-bound, reboot-safe)", .{}),
+        .ephemeral => log.warn("ephemeral key in use: secrets will NOT survive a restart", .{}),
+    }
 
     while (true) {
         var stream = server.accept(io) catch |err| {

@@ -33,6 +33,9 @@ pub fn build(b: *std.Build) void {
     daemon.root_module.addIncludePath(.{ .cwd_relative = brew_include });
     daemon.root_module.addLibraryPath(.{ .cwd_relative = brew_lib });
     daemon.root_module.linkSystemLibrary("sodium", .{});
+    // Keychain storage for the vault data key.
+    daemon.root_module.linkFramework("CoreFoundation", .{});
+    daemon.root_module.linkFramework("Security", .{});
     b.installArtifact(daemon);
 
     // CLI: hush

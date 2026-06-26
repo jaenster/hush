@@ -4,8 +4,9 @@ A macOS-local secrets daemon that replaces `.env` files — think *ssh-agent, bu
 environment variables*. Secrets live encrypted on disk and in `mlock`'d memory; a
 small CLI talks to a background daemon over a `0600` unix domain socket.
 
-> **Status: early MVP.** The daemon, CLI, wire protocol, encrypted store and memory
-> hygiene are implemented and working. Key management is still a placeholder — see
+> **Status: early MVP.** The daemon, CLI, wire protocol, encrypted store, memory
+> hygiene, and Keychain-backed key storage are implemented and working. Secrets
+> survive restarts and reboots. Touch ID gating is the next step — see
 > [Limitations](#limitations).
 
 ## Why
@@ -59,7 +60,7 @@ Source layout (`src/`):
 | `transport.zig` | length-prefixed framing over the socket |
 | `store.zig` | `mlock`'d map + atomic encrypted-file persistence |
 | `paths.zig` | filesystem locations |
-| `daemon/` | `hushd` + `key_provider.zig` (the key-management seam) |
+| `daemon/` | `hushd`, `key_provider.zig` (seam), `keychain.zig` (Security.framework) |
 | `cli/` | `hush` |
 
 ## Wire protocol
@@ -79,8 +80,9 @@ field             = u16_le len | bytes
 
 ## Security model
 
-- **Encrypted at rest.** The vault is XChaCha20-Poly1305 ciphertext; the data key is
-  never written in plaintext by the store. Disk theft yields useless bytes.
+- **Encrypted at rest.** The vault is XChaCha20-Poly1305 ciphertext. The data key is
+  held in the login Keychain as `…WhenUnlockedThisDeviceOnly` — never written to disk
+  in plaintext and never synced off the device. Disk theft yields useless bytes.
 - **No swap.** Secret values are held in `mlock`'d memory and zeroed on overwrite,
   delete and shutdown. Request/response buffers carrying secrets are wiped after use.
 - **Reboot-safe, not restore-safe** (by design): the design binds the data key to the
@@ -92,18 +94,22 @@ field             = u16_le len | bytes
 
 This is an MVP. Notably:
 
-- **Key management is a placeholder.** `daemon/key_provider.zig` currently returns an
-  *ephemeral* random key, so **secrets do not survive a daemon restart**. The daemon
-  logs this and tolerates a stale vault by starting empty. The next milestone replaces
-  it with a Keychain-stored data key, then a Secure-Enclave-wrapped key gated by
-  Touch ID.
+- **No Touch ID gating yet.** The data key lives in the Keychain and is released
+  whenever the device is unlocked; there is no per-access biometric approval. The next
+  milestone wraps the data key with a Secure Enclave key under
+  `kSecAccessControlUserPresence`. (`hushd --ephemeral` opts into a throwaway in-memory
+  key that survives nothing — handy for tests.)
+- **Rebuilding `hushd` may prompt once.** The Keychain ACL is bound to the binary's
+  code identity, so a fresh build will trigger a one-time "hushd wants to use a key"
+  prompt on the next key read — click *Always Allow*. A signed release build has a
+  stable identity and won't.
 - Single client served at a time (sequential accept).
 - No `hush run` wrapper, manifest, audit log or menubar UI yet.
 
 ## Roadmap
 
 1. ✅ Daemon + CLI + socket + `mlock` store + encrypted file
-2. Key management: Keychain → Secure Enclave + Touch ID approval
+2. ✅ Keychain-backed data key (reboot-safe) — *next:* Secure Enclave + Touch ID
 3. Audit log + rotation
 4. `.vault.toml` manifest (least-privilege, replaces `.env.example`)
 5. `hush run --env=<e> -- <cmd>` wrapper (inject at `execve`)

@@ -1,20 +1,23 @@
 //! Acquisition of the 32-byte data key that encrypts the vault.
 //!
-//! This is the seam where Secure Enclave / Keychain key-wrapping plugs in (the
-//! next milestone). The contract: return a key that is stable across daemon
-//! restarts and reboots, but never persisted in plaintext.
+//! This is the seam where Secure Enclave / Touch ID gating plugs in (the next
+//! milestone). The contract: return a key that is stable across daemon restarts
+//! and reboots, but never persisted in plaintext.
 //!
-//! `.ephemeral` is a development placeholder: a fresh random key every start,
-//! so secrets do NOT survive a restart. It exists so the socket/store/protocol
-//! pipeline can be exercised end-to-end before key management lands.
+//!   - `.keychain`  : key stored in the login Keychain, device-bound. Reboot-
+//!                    safe; this is the default.
+//!   - `.ephemeral` : a fresh random key every start (secrets do NOT survive a
+//!                    restart). Useful for tests and throwaway runs.
 
 const std = @import("std");
 const hush = @import("hush");
+const keychain = @import("keychain.zig");
 
-pub const Kind = enum { ephemeral };
+pub const Kind = enum { keychain, ephemeral };
 
 pub fn acquire(kind: Kind) !hush.crypto.Key {
     return switch (kind) {
+        .keychain => keychain.loadOrCreate(),
         .ephemeral => hush.crypto.randomKey(),
     };
 }
