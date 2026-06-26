@@ -115,6 +115,21 @@ pub const Store = struct {
         return out.toOwnedSlice(allocator);
     }
 
+    pub const Pair = struct { name: []const u8, value: []const u8 };
+
+    /// All (name, value) pairs within `env`. Caller owns the slice; the strings
+    /// borrow from the store.
+    pub fn dump(self: *Store, allocator: std.mem.Allocator, env: []const u8) ![]Pair {
+        var out: std.ArrayList(Pair) = .empty;
+        errdefer out.deinit(allocator);
+        var it = self.entries.iterator();
+        while (it.next()) |kv| {
+            const e = kv.value_ptr.*;
+            if (std.mem.eql(u8, e.env(), env)) try out.append(allocator, .{ .name = e.name(), .value = e.value });
+        }
+        return out.toOwnedSlice(allocator);
+    }
+
     // --- persistence ---------------------------------------------------------
 
     /// Serialize+encrypt the whole store and write atomically to `path`.

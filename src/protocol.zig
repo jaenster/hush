@@ -24,6 +24,8 @@ pub const Op = enum(u8) {
     get = 2,
     del = 3,
     list = 4,
+    /// Return all (key, value) pairs for an env — used by `hush run`.
+    dump = 5,
     _,
 };
 
@@ -40,6 +42,7 @@ pub const Request = union(Op) {
     get: struct { env: []const u8, key: []const u8 },
     del: struct { env: []const u8, key: []const u8 },
     list: struct { env: []const u8 },
+    dump: struct { env: []const u8 },
 };
 
 pub const Error = error{ Malformed, TooLarge, UnknownOp };
@@ -104,6 +107,7 @@ pub fn encodeRequest(allocator: std.mem.Allocator, req: Request) ![]u8 {
             try putField(&list, allocator, d.key);
         },
         .list => |l| try putField(&list, allocator, l.env),
+        .dump => |d| try putField(&list, allocator, d.env),
     }
     return list.toOwnedSlice(allocator);
 }
@@ -119,6 +123,7 @@ pub fn decodeRequest(payload: []const u8) Error!Request {
         .get => .{ .get = .{ .env = try cur.field(), .key = try cur.field() } },
         .del => .{ .del = .{ .env = try cur.field(), .key = try cur.field() } },
         .list => .{ .list = .{ .env = try cur.field() } },
+        .dump => .{ .dump = .{ .env = try cur.field() } },
         _ => Error.UnknownOp,
     };
 }

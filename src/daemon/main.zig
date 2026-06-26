@@ -157,6 +157,18 @@ fn handleRequest(
             defer gpa.free(names);
             return proto.encodeResponse(gpa, .ok, names);
         },
+        .dump => |d| {
+            const pairs = try store.dump(gpa, d.env);
+            defer gpa.free(pairs);
+            // Flatten to alternating key, value fields.
+            var fields: std.ArrayList([]const u8) = .empty;
+            defer fields.deinit(gpa);
+            for (pairs) |p| {
+                try fields.append(gpa, p.name);
+                try fields.append(gpa, p.value);
+            }
+            return proto.encodeResponse(gpa, .ok, fields.items);
+        },
     }
 }
 

@@ -40,6 +40,22 @@ hush ping                            # health check
 Secrets are organized as `(env, key) -> value`, so `dev`, `tst` and `prod` are kept
 separate.
 
+### Replacing `.env`
+
+`hush run` resolves an env's secrets and injects them into a command — the secrets
+never touch disk and the daemon is the only thing that ever held them decrypted:
+
+```sh
+hush set dev DATABASE_URL postgres://localhost/app
+hush set dev STRIPE_KEY sk_test_123
+
+hush run --env=dev -- node server.js     # server.js sees DATABASE_URL + STRIPE_KEY
+hush run --env=dev -- printenv STRIPE_KEY # -> sk_test_123
+```
+
+The command inherits your normal environment with the env's secrets layered on top,
+and `hush` exits with the command's exit code.
+
 ## Architecture
 
 ```
@@ -75,7 +91,7 @@ response payload  = u8 status | field*
 field             = u16_le len | bytes
 ```
 
-`op`: ping=0, set=1, get=2, del=3, list=4.
+`op`: ping=0, set=1, get=2, del=3, list=4, dump=5 (all pairs in an env, for `run`).
 `status`: ok=0, err=1, not_found=2.
 
 ## Key providers
@@ -138,8 +154,8 @@ This is an MVP. Notably:
 1. ✅ Daemon + CLI + socket + `mlock` store + encrypted file
 2. ✅ Keychain-backed data key (reboot-safe); Touch ID providers implemented
    (`--touch-id`, `--secure-enclave`) — pending a code-signed build to validate
-3. Audit log + rotation
-4. `.vault.toml` manifest (least-privilege, replaces `.env.example`)
-5. `hush run --env=<e> -- <cmd>` wrapper (inject at `execve`)
+3. ✅ `hush run --env=<e> -- <cmd>` wrapper (inject env, exec the command)
+4. Audit log + rotation
+5. `.vault.toml` manifest (least-privilege, replaces `.env.example`)
 6. Provider federation (1Password / Keeper references)
 7. Menubar UI

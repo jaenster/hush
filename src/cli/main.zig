@@ -5,6 +5,7 @@
 //!   hush get <env> <key>
 //!   hush del <env> <key>
 //!   hush ls  <env>
+//!   hush run --env=<env> -- <command> [args...]
 
 const std = @import("std");
 const hush = @import("hush");
@@ -18,9 +19,12 @@ const usage =
     \\  hush get <env> <key>
     \\  hush del <env> <key>
     \\  hush ls  <env>
+    \\  hush run --env=<env> -- <command> [args...]
     \\  hush version
     \\
 ;
+
+const run_usage = "usage: hush run --env=<env> -- <command> [args...]\n";
 
 fn isHelp(verb: []const u8) bool {
     const eql = std.mem.eql;
@@ -47,21 +51,16 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print("hush {s}\n", .{version});
         return 0;
     }
+    if (std.mem.eql(u8, verb, "run")) {
+        return runWrapper(init, &args);
+    }
 
     const req = buildRequest(verb, &args) orelse {
         std.debug.print("{s}", .{usage});
         return 2;
     };
 
-    var paths = try hush.paths.Paths.init(gpa);
-    defer paths.deinit();
-
-    const addr = try std.Io.net.UnixAddress.init(paths.socket);
-    var stream = addr.connect(io) catch |err| {
-        std.debug.print("hush: cannot connect to hushd at {s}: {t}\n", .{ paths.socket, err });
-        std.debug.print("hush: is the daemon running? (start it with `hushd`)\n", .{});
-        return 1;
-    };
+    var stream = (try connectOrReport(io, gpa)) orelse return 1;
     defer stream.close(io);
 
     var rbuf: [4096]u8 = undefined;
@@ -79,6 +78,89 @@ pub fn main(init: std.process.Init) !u8 {
     defer resp.deinit(gpa);
 
     return printResponse(io, verb, resp);
+}
+
+/// Connect to hushd, printing a friendly message (and returning null) if it
+/// isn't reachable.
+fn connectOrReport(io: std.Io, gpa: std.mem.Allocator) !?std.Io.net.Stream {
+    var paths = try hush.paths.Paths.init(gpa);
+    defer paths.deinit();
+    const addr = try std.Io.net.UnixAddress.init(paths.socket);
+    return addr.connect(io) catch |err| {
+        std.debug.print("hush: cannot connect to hushd: {t}\n", .{err});
+        std.debug.print("hush: is the daemon running? (start it with `hushd`)\n", .{});
+        return null;
+    };
+}
+
+/// `hush run --env=<env> -- <command> [args...]`: resolve the env's secrets,
+/// inject them into the environment, and exec the command (replacing this
+/// process).
+fn runWrapper(init: std.process.Init, args: *std.process.Args.Iterator) !u8 {
+    const io = init.io;
+    const gpa = init.gpa;
+
+    var env: ?[]const u8 = null;
+    var child: std.ArrayList([]const u8) = .empty;
+    defer child.deinit(gpa);
+
+    var after_sep = false;
+    while (args.next()) |a| {
+        if (after_sep) {
+            try child.append(gpa, a);
+        } else if (std.mem.eql(u8, a, "--")) {
+            after_sep = true;
+        } else if (std.mem.startsWith(u8, a, "--env=")) {
+            env = a["--env=".len..];
+        } else if (std.mem.eql(u8, a, "--env")) {
+            env = args.next();
+        } else {
+            std.debug.print("hush: unexpected argument '{s}'\n{s}", .{ a, run_usage });
+            return 2;
+        }
+    }
+
+    const env_name = env orelse {
+        std.debug.print("hush: --env is required\n{s}", .{run_usage});
+        return 2;
+    };
+    if (child.items.len == 0) {
+        std.debug.print("hush: no command given\n{s}", .{run_usage});
+        return 2;
+    }
+
+    var stream = (try connectOrReport(io, gpa)) orelse return 1;
+    defer stream.close(io);
+
+    var rbuf: [4096]u8 = undefined;
+    var wbuf: [4096]u8 = undefined;
+    var sr = stream.reader(io, &rbuf);
+    var sw = stream.writer(io, &wbuf);
+
+    const payload = try hush.protocol.encodeRequest(gpa, .{ .dump = .{ .env = env_name } });
+    defer gpa.free(payload);
+    try hush.transport.writeFrame(&sw.interface, payload);
+
+    const resp_buf = try hush.transport.readFrame(&sr.interface, gpa);
+    defer freeSecret(gpa, resp_buf);
+    var resp = try hush.protocol.decodeResponse(gpa, resp_buf);
+    defer resp.deinit(gpa);
+
+    if (resp.status != .ok) {
+        std.debug.print("hush: could not resolve env '{s}'\n", .{env_name});
+        return 1;
+    }
+
+    // Inject secrets (alternating key, value fields) on top of the inherited env.
+    var i: usize = 0;
+    while (i + 1 < resp.fields.items.len) : (i += 2) {
+        try init.environ_map.put(resp.fields.items[i], resp.fields.items[i + 1]);
+    }
+
+    // Replace this process with the command; only returns on failure.
+    const err = std.process.replace(io, .{ .argv = child.items, .environ_map = init.environ_map });
+    std.debug.print("hush: cannot exec '{s}': {t}\n", .{ child.items[0], err });
+    return 1;
 }
 
 /// Zero a heap buffer that may contain secret material, then free it.
