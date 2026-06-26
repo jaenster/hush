@@ -101,8 +101,11 @@ which also keeps secret bytes out of parse buffers. All integers little-endian.
 frame             = u32_le len | payload
 request payload   = u8 op | field*
 response payload  = u8 status | field*
-field             = u16_le len | bytes
+field             = u32_le len | bytes
 ```
+
+Keys must be valid env var names (`[A-Za-z_][A-Za-z0-9_]*`); the daemon rejects
+anything else at `set`, since keys are injected as environment variables.
 
 `op`: ping=0, set=1, get=2, del=3, list=4, dump=5 (all pairs in an env, for `run`).
 `status`: ok=0, err=1, not_found=2.
@@ -159,7 +162,9 @@ This is an MVP. Notably:
   stable identity.
 - Per-environment caching policy (cache low-sensitivity envs, always-prompt for prod)
   is not implemented; the chosen provider applies to the whole vault.
-- Single client served at a time (sequential accept).
+- Single client served at a time (sequential accept) — a client that connects and
+  stalls without sending wedges the daemon for others until it disconnects. Needs
+  per-connection concurrency + a thread-safe store to fix.
 - No `hush run` wrapper, manifest, audit log or menubar UI yet.
 
 ## Roadmap

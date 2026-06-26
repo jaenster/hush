@@ -60,15 +60,15 @@ const Cursor = struct {
         return v;
     }
 
-    fn u16v(self: *Cursor) Error!u16 {
-        if (self.pos + 2 > self.buf.len) return Error.Malformed;
-        const v = std.mem.readInt(u16, self.buf[self.pos..][0..2], .little);
-        self.pos += 2;
+    fn u32v(self: *Cursor) Error!u32 {
+        if (self.pos + 4 > self.buf.len) return Error.Malformed;
+        const v = std.mem.readInt(u32, self.buf[self.pos..][0..4], .little);
+        self.pos += 4;
         return v;
     }
 
     fn field(self: *Cursor) Error![]const u8 {
-        const len = try self.u16v();
+        const len = try self.u32v();
         if (self.pos + len > self.buf.len) return Error.Malformed;
         const s = self.buf[self.pos .. self.pos + len];
         self.pos += len;
@@ -77,9 +77,10 @@ const Cursor = struct {
 };
 
 fn putField(list: *std.ArrayList(u8), allocator: std.mem.Allocator, s: []const u8) !void {
-    if (s.len > std.math.maxInt(u16)) return Error.TooLarge;
-    var len_buf: [2]u8 = undefined;
-    std.mem.writeInt(u16, &len_buf, @intCast(s.len), .little);
+    // Bounded by the frame size; the whole frame must still fit under max_frame.
+    if (s.len > max_frame) return Error.TooLarge;
+    var len_buf: [4]u8 = undefined;
+    std.mem.writeInt(u32, &len_buf, @intCast(s.len), .little);
     try list.appendSlice(allocator, &len_buf);
     try list.appendSlice(allocator, s);
 }
@@ -213,4 +214,17 @@ test "decode rejects truncated field" {
 test "unknown op" {
     const bad = [_]u8{200};
     try std.testing.expectError(Error.UnknownOp, decodeRequest(&bad));
+}
+
+test "large value (>64KB) roundtrips" {
+    const a = std.testing.allocator;
+    const big = try a.alloc(u8, 100 * 1024);
+    defer a.free(big);
+    @memset(big, 'z');
+
+    const enc = try encodeRequest(a, .{ .set = .{ .env = "dev", .key = "CERT", .value = big } });
+    defer a.free(enc);
+    const dec = try decodeRequest(enc);
+    try std.testing.expectEqual(@as(usize, 100 * 1024), dec.set.value.len);
+    try std.testing.expectEqualStrings(big, dec.set.value);
 }

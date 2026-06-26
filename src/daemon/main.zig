@@ -138,6 +138,10 @@ fn handleRequest(
     switch (req) {
         .ping => return proto.encodeResponse(gpa, .ok, &.{}),
         .set => |s| {
+            if (!hush.names.isEnvVarName(s.key))
+                return proto.encodeResponse(gpa, .err, &.{"invalid key name: must be a [A-Za-z_][A-Za-z0-9_]* env var name"});
+            if (s.env.len == 0)
+                return proto.encodeResponse(gpa, .err, &.{"env name must not be empty"});
             store.set(s.env, s.key, s.value) catch |e| return errResp(gpa, e);
             store.save(io, paths.vault) catch |e| return errResp(gpa, e);
             return proto.encodeResponse(gpa, .ok, &.{});

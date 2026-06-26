@@ -98,7 +98,13 @@ fn request(io: std.Io, gpa: std.mem.Allocator, verb: []const u8, rest: []const [
     var sr = stream.reader(io, &rbuf);
     var sw = stream.writer(io, &wbuf);
 
-    const payload = try hush.protocol.encodeRequest(gpa, req);
+    const payload = hush.protocol.encodeRequest(gpa, req) catch |err| switch (err) {
+        error.TooLarge => {
+            std.debug.print("hush: value too large for a single message\n", .{});
+            return 2;
+        },
+        else => return err,
+    };
     defer freeSecret(gpa, payload);
     try hush.transport.writeFrame(&sw.interface, payload);
 
@@ -188,9 +194,16 @@ fn runWrapper(init: std.process.Init, run_args: []const []const u8) !u8 {
     }
 
     // Inject secrets (alternating key, value fields) on top of the inherited env.
+    // Defensively skip any key that isn't a valid env var name — an invalid name
+    // would corrupt the execve environment block.
     var f: usize = 0;
     while (f + 1 < resp.fields.items.len) : (f += 2) {
-        try init.environ_map.put(resp.fields.items[f], resp.fields.items[f + 1]);
+        const k = resp.fields.items[f];
+        if (!hush.names.isEnvVarName(k)) {
+            std.debug.print("hush: skipping invalid key name '{s}'\n", .{k});
+            continue;
+        }
+        try init.environ_map.put(k, resp.fields.items[f + 1]);
     }
 
     // Replace this process with the command; only returns on failure.
@@ -235,8 +248,15 @@ fn envCommand(init: std.process.Init, rest: []const []const u8) !u8 {
     const out = &ow.interface;
     var f: usize = 0;
     while (f + 1 < resp.fields.items.len) : (f += 2) {
+        const k = resp.fields.items[f];
+        // Never emit a key that isn't a valid env var name — it would be shell
+        // injection in `eval "$(hush env)"`.
+        if (!hush.names.isEnvVarName(k)) {
+            std.debug.print("hush: skipping invalid key name '{s}'\n", .{k});
+            continue;
+        }
         try out.writeAll("export ");
-        try out.writeAll(resp.fields.items[f]);
+        try out.writeAll(k);
         try out.writeAll("=");
         try writeShellQuoted(out, resp.fields.items[f + 1]);
         try out.writeAll("\n");
