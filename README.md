@@ -69,6 +69,28 @@ eval "$(hush env)"              # or: source <(hush env --env=prod)
 when it exits. `eval "$(hush env)"` is handy for interactive sessions but the secrets
 then persist in your shell and leak into everything it spawns.
 
+### Docker / Compose / CI
+
+`hush env --format=dotenv` prints `KEY=value` lines, which compose with anything that
+reads an env file — no Docker-specific integration, hush just stays a secrets source:
+
+```sh
+docker run --env-file <(hush env --env=prod --format=dotenv) myimage
+docker build --secret id=db,src=<(hush get prod DATABASE_URL) .
+```
+
+```yaml
+# docker-compose.yml — generate the env file first:
+#   hush env --env=prod --format=dotenv > .env.prod
+services:
+  app:
+    env_file: .env.prod
+```
+
+`--format` accepts `shell` (default) or `dotenv` (aliases: `docker`, `env-file`).
+Multi-line secret values can't be represented in an env file, so they're skipped
+with a warning in `dotenv` format.
+
 ## Architecture
 
 ```

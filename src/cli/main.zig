@@ -19,7 +19,7 @@ const usage =
     \\usage:
     \\  hush -- <command> [args...]              run a command with secrets injected
     \\  hush --env=<env> -- <command> [args...]  ... using a specific env
-    \\  hush env [--env=<env>]                   print `export KEY=...` for `eval "$(hush env)"`
+    \\  hush env [--env=<env>] [--format=shell|dotenv]   print secrets for eval or --env-file
     \\  hush set <env> <key> <value>
     \\  hush get <env> <key>
     \\  hush del <env> <key>
@@ -212,14 +212,53 @@ fn runWrapper(init: std.process.Init, run_args: []const []const u8) !u8 {
     return 1;
 }
 
-/// `hush env [--env=<env>]`: print POSIX `export KEY='value'` lines for the
-/// env's secrets, intended for `eval "$(hush env)"`. The env defaults to
-/// $HUSH_ENV, then "dev".
+const Format = enum {
+    /// `export KEY='value'` for `eval "$(hush env)"`.
+    shell,
+    /// `KEY=value` for `docker run --env-file`, compose, .env files, CI.
+    dotenv,
+};
+
+fn parseFormat(s: []const u8) ?Format {
+    const eql = std.mem.eql;
+    if (eql(u8, s, "shell") or eql(u8, s, "export")) return .shell;
+    if (eql(u8, s, "dotenv") or eql(u8, s, "docker") or eql(u8, s, "env-file")) return .dotenv;
+    return null;
+}
+
+/// `hush env [--env=<env>] [--format=shell|dotenv]`: print the env's secrets
+/// for shell `eval` (default) or as `KEY=value` lines (for `docker --env-file`,
+/// compose, .env, CI). The env defaults to $HUSH_ENV, then "dev".
 fn envCommand(init: std.process.Init, rest: []const []const u8) !u8 {
     const io = init.io;
     const gpa = init.gpa;
 
-    const env_name = envFromFlags(rest) orelse init.environ_map.get("HUSH_ENV") orelse default_env;
+    var env_flag: ?[]const u8 = null;
+    var format: Format = .shell;
+    var i: usize = 0;
+    while (i < rest.len) : (i += 1) {
+        const a = rest[i];
+        if (std.mem.startsWith(u8, a, "--env=")) {
+            env_flag = a["--env=".len..];
+        } else if (std.mem.eql(u8, a, "--env")) {
+            i += 1;
+            if (i >= rest.len) {
+                std.debug.print("hush: --env needs a value\n", .{});
+                return 2;
+            }
+            env_flag = rest[i];
+        } else if (std.mem.startsWith(u8, a, "--format=")) {
+            format = parseFormat(a["--format=".len..]) orelse {
+                std.debug.print("hush: unknown format '{s}' (use shell or dotenv)\n", .{a["--format=".len..]});
+                return 2;
+            };
+        } else {
+            std.debug.print("hush: unexpected argument '{s}'\n", .{a});
+            return 2;
+        }
+    }
+
+    const env_name = env_flag orelse init.environ_map.get("HUSH_ENV") orelse default_env;
 
     var stream = (try connectOrReport(io, gpa)) orelse return 1;
     defer stream.close(io);
@@ -249,17 +288,35 @@ fn envCommand(init: std.process.Init, rest: []const []const u8) !u8 {
     var f: usize = 0;
     while (f + 1 < resp.fields.items.len) : (f += 2) {
         const k = resp.fields.items[f];
+        const v = resp.fields.items[f + 1];
         // Never emit a key that isn't a valid env var name — it would be shell
-        // injection in `eval "$(hush env)"`.
+        // injection in `eval "$(hush env)"` and an invalid Docker env-file line.
         if (!hush.names.isEnvVarName(k)) {
             std.debug.print("hush: skipping invalid key name '{s}'\n", .{k});
             continue;
         }
-        try out.writeAll("export ");
-        try out.writeAll(k);
-        try out.writeAll("=");
-        try writeShellQuoted(out, resp.fields.items[f + 1]);
-        try out.writeAll("\n");
+        switch (format) {
+            .shell => {
+                try out.writeAll("export ");
+                try out.writeAll(k);
+                try out.writeAll("=");
+                try writeShellQuoted(out, v);
+                try out.writeAll("\n");
+            },
+            .dotenv => {
+                // Docker --env-file takes the value literally and has no way to
+                // represent a newline, so skip multi-line secrets rather than
+                // emit a broken file.
+                if (std.mem.indexOfScalar(u8, v, '\n') != null) {
+                    std.debug.print("hush: skipping '{s}' (multi-line value unsupported in dotenv format)\n", .{k});
+                    continue;
+                }
+                try out.writeAll(k);
+                try out.writeAll("=");
+                try out.writeAll(v);
+                try out.writeAll("\n");
+            },
+        }
     }
     try out.flush();
     return 0;
@@ -277,16 +334,6 @@ fn writeShellQuoted(out: *std.Io.Writer, s: []const u8) !void {
     }
     try out.writeAll(rest);
     try out.writeAll("'");
-}
-
-fn envFromFlags(rest: []const []const u8) ?[]const u8 {
-    var i: usize = 0;
-    while (i < rest.len) : (i += 1) {
-        const a = rest[i];
-        if (std.mem.startsWith(u8, a, "--env=")) return a["--env=".len..];
-        if (std.mem.eql(u8, a, "--env")) return if (i + 1 < rest.len) rest[i + 1] else null;
-    }
-    return null;
 }
 
 /// Zero a heap buffer that may contain secret material, then free it.
