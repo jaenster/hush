@@ -5,9 +5,12 @@ environment variables*. Secrets live encrypted on disk and in `mlock`'d memory; 
 small CLI talks to a background daemon over a `0600` unix domain socket.
 
 > **Status: early MVP.** The daemon, CLI, wire protocol, encrypted store, memory
-> hygiene, and Keychain-backed key storage are implemented and working. Secrets
-> survive restarts and reboots. Touch ID gating is implemented but needs a
-> code-signed build — see [Key providers](#key-providers).
+> hygiene, Keychain-backed key storage, and 1Password/Keeper federation are
+> implemented and working. Secrets survive restarts and reboots. Touch ID gating
+> is implemented but needs a code-signed build — see [Key providers](#key-providers).
+
+📖 **Full documentation: [`docs/`](docs/README.md)** — getting started, CLI
+reference, providers, security model, wire protocol, architecture.
 
 ## Why
 
@@ -90,6 +93,24 @@ services:
 `--format` accepts `shell` (default) or `dotenv` (aliases: `docker`, `env-file`).
 Multi-line secret values can't be represented in an env file, so they're skipped
 with a warning in `dotenv` format.
+
+### Federate to 1Password / Keeper
+
+A value can be a **reference** into an external manager instead of an inline
+secret. hush resolves it on read (shelling out to the provider CLI), so the real
+secret never touches hush's disk — only the reference is stored:
+
+```sh
+hush set prod DATABASE_URL 'op://Private/app-db/url'      # 1Password
+hush set prod API_TOKEN    'keeper://abc123/field/token'  # Keeper
+
+hush get prod DATABASE_URL     # runs `op read ...`, prints the real value
+hush -- ./server               # injects the resolved values
+```
+
+`op` / `ksm` must be installed and authenticated in the daemon's environment.
+See [docs/providers.md](docs/providers.md) (adding a provider is a one-line
+table entry).
 
 ## Architecture
 
@@ -195,7 +216,8 @@ This is an MVP. Notably:
 2. ✅ Keychain-backed data key (reboot-safe); Touch ID providers implemented
    (`--touch-id`, `--secure-enclave`) — pending a code-signed build to validate
 3. ✅ `hush run --env=<e> -- <cmd>` wrapper (inject env, exec the command)
-4. Audit log + rotation
-5. `.vault.toml` manifest (least-privilege, replaces `.env.example`)
-6. Provider federation (1Password / Keeper references)
-7. Menubar UI
+4. ✅ Provider federation — `op://` (1Password) and `keeper://` (Keeper) references
+5. Audit log + rotation
+6. Project manifest (least-privilege, k8s-flavored, replaces `.env.example`)
+7. Per-connection concurrency (fix the sequential-accept wedge)
+8. Menubar UI
