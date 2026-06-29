@@ -11,7 +11,7 @@ curl -fsSL https://hush.typeguru.nl/install.sh | bash
 
 The binaries are not yet notarized, so the installer strips the Gatekeeper
 quarantine flag. Use `HUSH_NO_DAEMON=1` to skip the agent or `HUSH_BIN_DIR` to
-choose the install location. Apple Silicon only for now.
+choose the install location.
 
 ### From source
 

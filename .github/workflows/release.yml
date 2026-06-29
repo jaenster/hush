@@ -13,9 +13,15 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    name: build + publish (macOS arm64)
-    runs-on: macos-latest
+  build:
+    name: build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14, target: aarch64-macos }
+          - { os: macos-13, target: x86_64-macos }
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -35,23 +41,41 @@ jobs:
         run: zig build -Doptimize=ReleaseFast
 
       - name: Package
-        id: pkg
         env:
           TAG: ${{ steps.tag.outputs.tag }}
+          TARGET: ${{ matrix.target }}
         run: |
-          asset="hush-${TAG}-aarch64-macos.tar.gz"
+          asset="hush-${TAG}-${TARGET}.tar.gz"
           mkdir -p dist
           tar -czf "dist/${asset}" -C zig-out/bin hush hushd hush-bar
           ( cd dist && shasum -a 256 "${asset}" > "${asset}.sha256" )
-          echo "asset=${asset}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+
+  release:
+    name: publish
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: echo "tag=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: dist-*
+          merge-multiple: true
 
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          gh release view "$TAG" >/dev/null 2>&1 \
-            && gh release upload "$TAG" dist/* --clobber \
-            || gh release create "$TAG" dist/* \
-                 --title "hush $TAG" \
-                 --generate-notes
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            && gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber \
+            || gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" \
+                 --title "hush $TAG" --generate-notes

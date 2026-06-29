@@ -4,9 +4,11 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // Homebrew (Apple Silicon) prefix for libsodium headers/libs.
-    const brew_include = "/opt/homebrew/include";
-    const brew_lib = "/opt/homebrew/lib";
+    // libsodium lives in the Homebrew prefix, which differs by arch:
+    // Apple Silicon uses /opt/homebrew, Intel uses /usr/local.
+    const intel = target.result.cpu.arch == .x86_64;
+    const brew_include: []const u8 = if (intel) "/usr/local/include" else "/opt/homebrew/include";
+    const brew_lib: []const u8 = if (intel) "/usr/local/lib" else "/opt/homebrew/lib";
 
     // Shared core: protocol, crypto, store. Links libsodium via C.
     const core = b.addModule("hush", .{

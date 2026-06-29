@@ -30,8 +30,7 @@ die()  { printf "%b\n" "${RED}error:${RESET} $1" >&2; exit 1; }
 arch="$(uname -m)"
 case "$arch" in
   arm64|aarch64) target="aarch64-macos" ;;
-  x86_64)
-    die "Intel (x86_64) prebuilt binaries aren't published yet.\n  Build from source: ${CYN}https://github.com/${REPO}#build${RESET}" ;;
+  x86_64)        target="x86_64-macos" ;;
   *) die "unsupported architecture: $arch" ;;
 esac
 
