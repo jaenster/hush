@@ -24,7 +24,19 @@ whole file, and have no audit trail or rotation story. `hush` keeps secrets encr
 at rest, in locked (non-swappable) memory while live, and behind a single daemon you
 can later gate with Touch ID.
 
-## Build
+## Install
+
+```sh
+curl -fsSL https://hush.typeguru.nl/install.sh | bash
+```
+
+Downloads the latest release (CLI + daemon, Apple Silicon), verifies its
+checksum, installs the binaries, and sets up a launchd agent so `hushd` runs on
+login. The binaries are not yet notarized, so the installer strips the Gatekeeper
+quarantine flag. Set `HUSH_NO_DAEMON=1` to skip the agent, or `HUSH_BIN_DIR` to
+pick the install location.
+
+## Build from source
 
 Requires [Zig 0.16](https://ziglang.org/) and [libsodium](https://libsodium.org/)
 (`brew install libsodium`).

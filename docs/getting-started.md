@@ -2,6 +2,19 @@
 
 ## Install
 
+The quickest way — downloads the latest release, verifies its checksum, installs
+the binaries, and registers a launchd agent so `hushd` starts on login:
+
+```sh
+curl -fsSL https://hush.typeguru.nl/install.sh | bash
+```
+
+The binaries are not yet notarized, so the installer strips the Gatekeeper
+quarantine flag. Use `HUSH_NO_DAEMON=1` to skip the agent or `HUSH_BIN_DIR` to
+choose the install location. Apple Silicon only for now.
+
+### From source
+
 Requires [Zig 0.16](https://ziglang.org/) and [libsodium](https://libsodium.org/)
 (`brew install libsodium`). libsodium is linked statically, so the resulting
 binaries have no third-party runtime dependency.

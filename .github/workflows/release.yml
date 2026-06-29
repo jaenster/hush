@@ -1,0 +1,57 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: build + publish (macOS arm64)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve tag
+        id: tag
+        run: echo "tag=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - name: Install libsodium
+        run: brew install libsodium
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Build (ReleaseFast)
+        run: zig build -Doptimize=ReleaseFast
+
+      - name: Package
+        id: pkg
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          asset="hush-${TAG}-aarch64-macos.tar.gz"
+          mkdir -p dist
+          tar -czf "dist/${asset}" -C zig-out/bin hush hushd hush-bar
+          ( cd dist && shasum -a 256 "${asset}" > "${asset}.sha256" )
+          echo "asset=${asset}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 \
+            && gh release upload "$TAG" dist/* --clobber \
+            || gh release create "$TAG" dist/* \
+                 --title "hush $TAG" \
+                 --generate-notes
