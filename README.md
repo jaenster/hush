@@ -13,9 +13,9 @@ small CLI talks to a background daemon over a `0600` unix domain socket.
 > implemented and working. Secrets survive restarts and reboots. Touch ID gating
 > is implemented but needs a code-signed build — see [Key providers](#key-providers).
 
-📖 **Full documentation: [hush.typeguru.nl](https://hush.typeguru.nl)** (source in
-[`docs/`](docs/README.md)) — getting started, CLI reference, providers, security
-model, wire protocol, architecture.
+📖 **Full documentation: [hush.typeguru.nl](https://hush.typeguru.nl)** — getting
+started, CLI reference, providers, security model, wire protocol, architecture.
+The markdown source lives in [`docs/`](docs/README.md).
 
 ## Why
 
