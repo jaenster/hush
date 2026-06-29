@@ -26,11 +26,20 @@ can later gate with Touch ID.
 
 ## Install
 
+Homebrew:
+
+```sh
+brew install jaenster/tap/hush
+brew services start jaenster/tap/hush   # run hushd on login
+```
+
+Or the install script:
+
 ```sh
 curl -fsSL https://hush.typeguru.nl/install.sh | bash
 ```
 
-Downloads the latest release (CLI + daemon, Apple Silicon or Intel), verifies its
+Downloads the latest release (CLI + daemon, Apple Silicon), verifies its
 checksum, installs the binaries, and sets up a launchd agent so `hushd` runs on
 login. The binaries are not yet notarized, so the installer strips the Gatekeeper
 quarantine flag. Set `HUSH_NO_DAEMON=1` to skip the agent, or `HUSH_BIN_DIR` to

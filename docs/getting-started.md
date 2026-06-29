@@ -2,8 +2,15 @@
 
 ## Install
 
-The quickest way — downloads the latest release, verifies its checksum, installs
-the binaries, and registers a launchd agent so `hushd` starts on login:
+Homebrew (Apple Silicon):
+
+```sh
+brew install jaenster/tap/hush
+brew services start jaenster/tap/hush   # run hushd on login
+```
+
+Or the install script — downloads the latest release, verifies its checksum,
+installs the binaries, and registers a launchd agent so `hushd` starts on login:
 
 ```sh
 curl -fsSL https://hush.typeguru.nl/install.sh | bash
