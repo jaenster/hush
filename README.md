@@ -1,5 +1,9 @@
 # hush
 
+[![CI](https://github.com/jaenster/hush/actions/workflows/ci.yml/badge.svg)](https://github.com/jaenster/hush/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Docs](https://img.shields.io/badge/docs-hush.typeguru.nl-indigo.svg)](https://hush.typeguru.nl)
+
 A macOS-local secrets daemon that replaces `.env` files — think *ssh-agent, but for
 environment variables*. Secrets live encrypted on disk and in `mlock`'d memory; a
 small CLI talks to a background daemon over a `0600` unix domain socket.
@@ -9,8 +13,9 @@ small CLI talks to a background daemon over a `0600` unix domain socket.
 > implemented and working. Secrets survive restarts and reboots. Touch ID gating
 > is implemented but needs a code-signed build — see [Key providers](#key-providers).
 
-📖 **Full documentation: [`docs/`](docs/README.md)** — getting started, CLI
-reference, providers, security model, wire protocol, architecture.
+📖 **Full documentation: [hush.typeguru.nl](https://hush.typeguru.nl)** (source in
+[`docs/`](docs/README.md)) — getting started, CLI reference, providers, security
+model, wire protocol, architecture.
 
 ## Why
 

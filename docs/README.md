@@ -9,4 +9,4 @@
 - [Wire protocol](protocol.md) — for writing SDKs
 - [Architecture](architecture.md) — internals and source map
 
-See the top-level [README](../README.md) for the overview.
+See the project [README on GitHub](https://github.com/jaenster/hush#readme) for the overview.
