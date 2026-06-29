@@ -1,6 +1,7 @@
 # hush documentation
 
 - [Getting started](getting-started.md) — install, first secrets, `hush run`
+- [Recipes](recipes.md) — using hush in package.json, Docker, Makefiles, CI, …
 - [CLI reference](cli.md) — every command and flag
 - [Key providers](key-providers.md) — Keychain, Touch ID, Secure Enclave
 - [Provider federation](providers.md) — `op://` / `keeper://` references
